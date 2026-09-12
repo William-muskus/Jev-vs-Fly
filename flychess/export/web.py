@@ -16,6 +16,7 @@ rounded weights exactly as stored in the blob.
 from __future__ import annotations
 
 import gzip
+import hashlib
 import json
 import math
 from datetime import UTC, datetime
@@ -175,6 +176,7 @@ def export_web(
             chunks.append(b"\0" * pad)
         offset += len(data) + pad
     blob = b"".join(chunks)
+    gz = gzip.compress(blob, compresslevel=6, mtime=0)
 
     header: dict[str, Any] = {
         "format": "flyb",
@@ -203,13 +205,15 @@ def export_web(
         "super_class_legend": list(SUPER_CLASS_LEGEND),
         "graph_meta": dict(graph.meta),
         "total_bytes": len(blob),
+        # the web loader verifies the downloaded blob against these (stale-cache / out-of-sync guard)
+        "blob_sha256": hashlib.sha256(blob).hexdigest(),
+        "gzip_bytes": len(gz),
         "arrays": entries,
     }
     header.update(extra_meta)  # any remaining caller metadata (must be JSON-serialisable)
 
     (out_dir / "brain.flyb").write_bytes(blob)
-    with gzip.open(out_dir / "brain.flyb.gz", "wb", compresslevel=6) as f:
-        f.write(blob)
+    (out_dir / "brain.flyb.gz").write_bytes(gz)
     (out_dir / "brain.json").write_text(json.dumps(header, indent=1, default=_json_default))
     return json.loads((out_dir / "brain.json").read_text())
 

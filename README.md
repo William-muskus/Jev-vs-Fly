@@ -2,12 +2,13 @@
 
 **A chess engine whose neural network is a fruit fly's brain.**
 
-The player is a recurrent neural network with **134,209 neurons and 2,700,513 synapses** — not a
-network *inspired* by a brain, but the actual wiring diagram of an adult *Drosophila melanogaster*
-from the [FlyWire](https://flywire.ai) connectome (Dorkenwald et al. 2024, Schlegel et al. 2024).
-Every synapse in the model exists in the fly; every synapse in the fly (above the 5-synapse threshold
-of the public release) is in the model. The board is injected into the fly's sensory neurons, the
-activity of its descending and motor neurons is read out as a move. Nothing else picks moves.
+The player is a recurrent neural network with **134,209 neurons and 2,700,513 synaptic connections
+(34.2 million synapses)** — not a network *inspired* by a brain, but the actual wiring diagram of an
+adult *Drosophila melanogaster* from the [FlyWire](https://flywire.ai) connectome (Dorkenwald et al.
+2024, Schlegel et al. 2024). Every connection in the model exists in the fly; every neuron-to-neuron
+connection in the fly with at least 5 synapses (the threshold of the public release) is in the model.
+The board is injected into the fly's sensory neurons, the activity of its descending and motor neurons
+is read out as a move. Nothing else picks moves.
 
 The same network runs in the browser — a hand-written sparse engine in plain JavaScript evaluates the
 exported connectome, and a cross-language parity test guarantees it computes the same numbers as
@@ -58,18 +59,28 @@ What is **fixed by biology** and what is **learned**:
 
 | Component | Source | Learned? |
 |---|---|---|
-| Which synapses exist (2,700,513 pre→post pairs) | connectome | no — never |
-| Sign of every synapse (Dale's law: ACh +, GABA −, glutamate −, monoamines +) | presynaptic neurotransmitter | no — never |
-| Synapse strength magnitude (`w = sign · softplus(gain)`) | initialised from log(1 + synapse count) | yes |
+| Which connections exist (2,700,513 pre→post pairs) | connectome | no — never |
+| Sign of every connection (Dale's law: ACh +, GABA −, glutamate −, monoamines +; one sign per presynaptic neuron) | presynaptic neurotransmitter (unannotated neurons: synapse-weighted majority of their connection-level predictions) | no — never |
+| Connection strength magnitude (`w = sign · softplus(gain)`) | initialised from log(1 + synapse count) | yes |
 | Per-neuron bias and leak (time constant) | init 0 / 0.5 | yes |
 | Sensory projection `W_in` (board planes → 2,048 sensory neurons) | random init | yes |
 | Motor read-out (`policy_head`, `value_head` on 1,415 descending/motor neurons) | random init | yes |
 
-That is 11.9M trainable numbers for the full brain, 2.7M of which are synapse strengths whose sign
+That is 11.9M trainable numbers for the full brain, 2.7M of which are connection strengths whose sign
 can never flip. The learned part is essentially "how strongly does each existing connection count"
 plus how the board is shown to the fly and how its motor output is decoded. `SpMM` in
 `flychess/model/spmm.py` is a custom autograd function (CSR forward, SDDMM backward on the same
 pattern) so the 134k×134k matrix is never densified.
+
+**The numbers** (from the `meta` of `data/brain/full.npz`; `fly build-brain` prints a one-line summary):
+
+| | |
+|---|---|
+| FlyWire neurons (snapshot 783) | 139,255 → **134,209** with at least one connection of ≥ 5 synapses (28 descending/motor read-out neurons are isolated at that threshold but kept) |
+| Connections (CSR non-zeros) | **2,700,513** pre→post pairs, 1,644,081 excitatory / 1,056,432 inhibitory (predicted transmitters, Eckstein et al. 2024) |
+| Synapses | **34,153,566** (median 8 per connection, max 2,405) — the initial strength of each connection is log(1 + count) |
+| Input neurons | 2,048 of the 14,663 sensory / ascending / sensory-ascending neurons (904 / 1,072 / 72), the ones with the most outputs |
+| Output neurons | all 1,305 descending + 110 motor neurons |
 
 Training happens in two stages (SPEC §6):
 
@@ -81,19 +92,27 @@ Training happens in two stages (SPEC §6):
 
 ## Quickstart
 
-Requirements: Python ≥ 3.12, a CUDA GPU for the full brain (the 2000-neuron `--tiny` preset runs on
-CPU), ~1 GB disk for the connectome tables, ~100 MB per month of Lichess games, Node ≥ 20 for the JS
-tests (optional).
+Requirements: Python ≥ 3.12; a CUDA GPU with ≥ 12 GB for the full brain (the 2000-neuron `--tiny`
+preset runs on CPU); Node ≥ 20 for the JS tests (optional). Disk: ~0.3 GB for the connectome (tables +
+parsed cache), 110–260 MB per month of Lichess games (2.0 GB for all of 2014) plus ~2.3 GB of shards
+for the full year.
+
+GPU note: the lockfile pins `torch` 2.14 with CUDA 13 wheels from PyPI, which runs on Blackwell
+(sm_120) cards. If you install with pip into an existing environment, make sure
+`python -c 'import torch; print(torch.version.cuda)'` prints ≥ 12.8 — older cu12x builds import fine
+but cannot run kernels on those GPUs.
 
 ```bash
 git clone https://github.com/cesp99/fly-chess && cd fly-chess
-uv sync                       # or: pip install -e '.[dev]'
+uv sync                       # installs the project + the `dev` group (pytest, ruff, httpx)
+                              # pip alternative: pip install -e . && pip install --group dev   (pip ≥ 25.1)
 source .venv/bin/activate
 
 fly download                  # FlyWire tables (~60 MB) into data/connectome/, Lichess 2014-01 into data/pgn/
-fly build-brain               # data/brain/full.npz  (134k neurons, 2.7M synapses; ~1 min)
-fly build-shards --months 2014-01 --workers 16      # data/shards/lichess-NNNNN.npz (shuffled positions)
-fly train --run fly1          # stage 1 + stage 2 with configs/default.yaml semantics; Ctrl-C saves a checkpoint
+fly build-brain               # data/brain/full.npz  (134k neurons, 2.7M connections / 34M synapses; ~1 min)
+fly build-shards --months 2014-01 --workers 16      # data/shards/lichess-NNNNN.npz (shuffled positions; one month of the ~58M/year)
+                                                    # + lichess.val-NNNNN.npz: 1 game in 50 held out whole (game-disjoint val set)
+fly train --run fly1          # stage 1 + stage 2 with the built-in defaults (== configs/default.yaml); Ctrl-C saves a checkpoint
 fly dashboard --run fly1      # http://127.0.0.1:8765 — live loss / accuracy / Elo, latest game, neuron activity
 fly play --run fly1           # terminal game against the fly (--difficulty larva|fly|superfly, --color black)
 fly eval --run fly1 --games 50 --opponent random,material
@@ -113,12 +132,13 @@ fly export-web --run smoke && node --test web/test/parity.test.mjs
 ```
 
 `scripts/pipeline.sh` runs the whole real pipeline (download → brain → shards → train → export) with
-sensible defaults; every step is idempotent and skips work that is already done.
+sensible defaults — including all twelve months of 2014 (~58M positions), whereas the quickstart above
+shards only January; every step is idempotent and skips work that is already done.
 
-![dashboard screenshot placeholder](docs/dashboard.png)
+![fly dashboard: loss / top-k / Elo charts, the latest self-play game and a neuron-activity heatmap](docs/dashboard.png)
 
-*(`docs/dashboard.png` — dashboard screenshot; live charts of loss / top-k / Elo, the latest self-play
-game replaying on a board and a heatmap of neuron activity at connectome positions.)*
+*The dashboard: live charts of loss / top-k / Elo, the latest self-play game replaying on a board and a
+heatmap of neuron activity at connectome positions.*
 
 ### Configuration
 
@@ -126,7 +146,9 @@ game replaying on a board and a heatmap of neuron activity at connectome positio
 flags (`--steps`, `--batch-size`, `--lr`, `--graph`, `--shards-dir`, `--device`, `--resume`) and
 `--set key=value` for any other `TrainConfig` field, including nested ones (`--set brain.steps=4`).
 `--resume` continues from `runs/<run>/latest.pt` with the checkpoint's own config and warns about
-drift. Everything lives under `FLYCHESS_HOME` (default: the repository) — `data/`, `runs/`.
+drift; the data stream picks up where the checkpoint stopped (the already-trained prefix of the epoch is
+skipped, so a resumed one-epoch run still sees every position exactly once). Everything lives under
+`FLYCHESS_HOME` (default: the repository) — `data/`, `runs/`.
 
 ## Architecture
 
@@ -137,7 +159,7 @@ drift. Everything lives under `FLYCHESS_HOME` (default: the repository) — `dat
                                                     ▼
              ┌──────────────────────────── fly train ────────────────────────────┐
              │  stage 1 imitation        stage 2 self-play (batched MCTS, replay) │
-             │  FlyBrain: board ──► W_in ──► [ 134k neurons, 2.7M synapses ]×8    │
+             │  FlyBrain: board ──► W_in ──► [ 134k neurons, 2.7M connections ]×8 │
              │                                  └──► policy (4168) / value (1)   │
              └───────────────► runs/<run>/{ckpt-N.pt, latest.pt, metrics.jsonl} ─┘
                                    │                       │
@@ -175,7 +197,7 @@ leaks, input/output projections, 3-D neuron positions) and a gzipped copy. In th
 - `engine/loader.js` streams the `.gz` with a progress bar, gunzips it with `DecompressionStream`,
   caches the decoded buffer in the Cache API and creates typed-array views (f16 → f32 by lookup table);
 - `engine/flybrain.js` runs the recurrence as a plain CSR sparse-matrix × vector loop — the same math
-  as the PyTorch module, ~4 ms per timestep for 2.7M synapses;
+  as the PyTorch module, ~4 ms per timestep for 2.7M connections;
 - `engine/mcts.js` is the same PUCT search as Python for *superfly*;
 - everything runs in a Web Worker; the page shows the board, the fly's mood, live neuron activity at
   connectome coordinates, commentary from the policy/value, a share card, a local leaderboard and a
@@ -185,8 +207,9 @@ leaks, input/output projections, 3-D neuron positions) and a gzipped copy. In th
 values computed with numpy *from the exported f16 bytes* for 12 curated positions (black to move,
 castling, both en passant captures, promotions, check, a repeated position). `node --test
 web/test/parity.test.mjs` loads `web/model/` with the site's own loader and asserts the JS engine
-matches within 1e-2 on every logit and value and picks the same best move; in practice the difference
-is ~1e-7. The full brain is ~45 MB raw / ~30 MB gzipped.
+matches within 1e-2 on the 20 highest legal-move logits and the value for every position and picks the
+same best move; in practice the difference
+is ~1e-7. The full brain is ~37 MB raw / ~30 MB gzipped.
 
 ## Python API
 
@@ -239,8 +262,9 @@ Tests: `python -m pytest -q` (≈25 s, CPU or GPU), `node --test web/test/*.mjs`
   electron microscopy images at synaptic sites in *Drosophila melanogaster*. *Cell* 187 (2024);
   glutamate is treated as inhibitory (GluCl) as is standard for the fly CNS.
 - **Games** — the [Lichess open database](https://database.lichess.org) (CC0).
-- **chess.js** (BSD-2-Clause) for move generation in the browser; **python-chess** (GPL-3.0, used as
-  a library at training time) on the Python side.
+- **python-chess** (GPL-3.0+) drives move generation on the Python side — training, play, eval and
+  export all import it (MIT code using a GPL library, which is fine); the browser uses **chess.js**
+  (BSD-2-Clause) instead.
 
 If you use this in research, please cite the FlyWire papers above; this repository is a
 demonstration built on their work.
@@ -266,7 +290,7 @@ demonstration built on their work.
 ## FAQ
 
 **Is it really the fly?** Yes, in the sense that the network's connectivity graph and synapse signs
-are the FlyWire adult connectome, unchanged — no synapse is added, removed or re-signed by training.
+are the FlyWire adult connectome, unchanged — no connection is added, removed or re-signed by training.
 No, in the sense that the *dynamics* are a simple rate model, the strengths are learned, and the
 board input and move read-out are new learned projections. `docs/SPEC.md §0` is the formal promise:
 the fly brain is the only thing that picks moves, in Python and in the browser, verified by the
@@ -278,7 +302,7 @@ PATH). The dashboard tracks Elo over training. Expect it to beat a random mover 
 imitation and to lose to any real engine.
 
 **Why a fly?** It is the largest whole-brain connectome available at synapse resolution with
-neurotransmitter labels, and it fits on one GPU: 134k neurons × 2.7M synapses is small enough to
+neurotransmitter labels, and it fits on one GPU: 134k neurons × 2.7M connections is small enough to
 train and to ship to a browser.
 
 **Can I use a different brain?** `fly build-brain --region central` drops the optic lobes (~50k

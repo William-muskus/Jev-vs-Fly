@@ -5,6 +5,10 @@
 //   board.setLegal(chess.moves({verbose:true}));
 //   board.highlight({ lastMove: ['e2', 'e4'], check: 'e8' });
 //   board.setMovable('white' | 'black' | null);
+//   board.cancelPromotion();               // dismiss the promotion picker (also closed by any of the above)
+//
+// Keyboard: the board is focusable; arrow keys move a cursor, Enter/Space selects a piece or drops
+// it on the cursor square, Escape cancels the selection / promotion picker.
 //
 // Pieces are hand-drawn SVG (see PIECES); colours come from CSS custom properties on the host
 // (--sq-light, --sq-dark, --piece-w, --piece-w-ink, --piece-b, --piece-b-ink, --hl-*).
@@ -64,6 +68,8 @@ export class Board {
     this.pieces = new Map();       // square -> {type, color, el}
     this.marks = { lastMove: null, check: null };
     this.drag = null;
+    this.cursor = null;            // keyboard cursor square (shown only while driven by the keyboard)
+    this._kb = false;
     this._build();
     this._bind();
   }
@@ -71,7 +77,10 @@ export class Board {
   // ------------------------------------------------------------------ construction
   _build() {
     this.el.classList.add('cb-host');
-    const svg = svgEl('svg', { viewBox: `0 0 ${8 * S} ${8 * S}`, class: 'cb', role: 'img', 'aria-label': 'chess board' });
+    const svg = svgEl('svg', {
+      viewBox: `0 0 ${8 * S} ${8 * S}`, class: 'cb', role: 'application', tabindex: 0,
+      'aria-label': 'chess board. Arrow keys move the cursor, Enter selects or drops a piece, Escape cancels.',
+    });
     this.svg = svg;
     this.gSquares = svgEl('g', { class: 'cb-squares' }, svg);
     this.gMarks = svgEl('g', { class: 'cb-marks' }, svg);
@@ -144,6 +153,7 @@ export class Board {
   // ------------------------------------------------------------------ public API
   /** Set orientation ('white' | 'black') and re-layout. */
   setOrientation(color) {
+    this._closePromotion();
     this.orientation = color;
     this._layoutSquares();
   }
@@ -152,6 +162,7 @@ export class Board {
 
   /** Which side the user may move; null locks the board. */
   setMovable(color) {
+    this._closePromotion();          // a picker only makes sense for the position/turn it was opened in
     this.movable = color === 'white' ? 'w' : color === 'black' ? 'b' : color || null;
     if (!this.movable) this._select(null);
     this.el.classList.toggle('cb-locked', !this.movable);
@@ -165,6 +176,7 @@ export class Board {
 
   /** Update the position from a FEN, animating pieces that moved. */
   setPosition(fen, { animate = true } = {}) {
+    this._closePromotion();
     const next = parseFenPieces(fen);
     const removed = [];
     for (const [sq, p] of this.pieces) {
@@ -201,6 +213,9 @@ export class Board {
     this._renderMarks();
   }
 
+  /** Dismiss the promotion picker, if open (the pending move is dropped). */
+  cancelPromotion() { this._closePromotion(); }
+
   /** Squares of the pieces currently on the board (for tests / share card). */
   position() {
     const out = {};
@@ -215,6 +230,7 @@ export class Board {
     if (lastMove) for (const sq of lastMove) { const { x, y } = this._xy(sq); svgEl('rect', { x, y, width: S, height: S, class: 'cb-last' }, this.gMarks); }
     if (check) { const { x, y } = this._xy(check); svgEl('rect', { x, y, width: S, height: S, class: 'cb-check' }, this.gMarks); }
     if (this.selected) { const { x, y } = this._xy(this.selected); svgEl('rect', { x, y, width: S, height: S, class: 'cb-selected' }, this.gMarks); }
+    if (this.cursor && this._kb) { const { x, y } = this._xy(this.cursor); svgEl('rect', { x, y, width: S, height: S, class: 'cb-cursor' }, this.gMarks); }
   }
 
   _renderDots() {
@@ -268,13 +284,19 @@ export class Board {
       const p = svgEl('g', { class: `cb-piece cb-${color} cb-static` }, g);
       p.innerHTML = PIECES[pc];
       p.style.transform = `translate(${x}px, ${yy}px)`;
-      const pick = (e) => { e.stopPropagation(); this._closePromotion(); this._select(null); this.onMove(from, to, pc); };
+      const pick = (e) => { e.stopPropagation(); e.preventDefault(); this._closePromotion(); this._select(null); this.onMove(from, to, pc); };
       g.addEventListener('pointerdown', pick);
       g.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') pick(e); });
     });
+    if (this._kb) this.gPromo.querySelector('.cb-promo-choice')?.focus?.();
   }
 
-  _closePromotion() { this.gPromo.replaceChildren(); }
+  _closePromotion() {
+    if (!this.gPromo.childElementCount) return;
+    const hadFocus = typeof document !== 'undefined' && this.gPromo.contains(document.activeElement);
+    this.gPromo.replaceChildren();
+    if (hadFocus) this.svg.focus?.();          // keep keyboard users on the board
+  }
 
   // ------------------------------------------------------------------ interaction
   _bind() {
@@ -284,10 +306,62 @@ export class Board {
     svg.addEventListener('pointerup', (e) => this._up(e));
     svg.addEventListener('pointercancel', () => this._cancelDrag());
     svg.addEventListener('contextmenu', (e) => e.preventDefault());
+    svg.addEventListener('keydown', (e) => this._key(e));
+    svg.addEventListener('blur', () => this._setKb(false));
+  }
+
+  _setKb(on) {
+    if (this._kb === on) return;
+    this._kb = on;
+    this._renderMarks();
+  }
+
+  /** Move the keyboard cursor by (dx, dy) screen squares (viewer's perspective). */
+  _moveCursor(dx, dy) {
+    const white = this.orientation === 'white';
+    let f, r;
+    if (this.cursor) { f = FILES.indexOf(this.cursor[0]); r = +this.cursor[1] - 1; }
+    else { f = white ? 4 : 3; r = white ? 0 : 7; }                 // start on the near king square
+    f += white ? dx : -dx; r += white ? -dy : dy;
+    if (f < 0 || f > 7 || r < 0 || r > 7) return;
+    this.cursor = FILES[f] + (r + 1);
+  }
+
+  _key(e) {
+    if (this.gPromo.contains(e.target)) {                           // inside the promotion picker
+      if (e.key === 'Escape') { e.preventDefault(); this._closePromotion(); }
+      return;
+    }
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      if (this.gPromo.childElementCount) this._closePromotion();
+      else if (this.selected) this._select(null);
+      return;
+    }
+    const ARROWS = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] };
+    if (ARROWS[e.key]) {
+      e.preventDefault();
+      if (this.gPromo.childElementCount) return;
+      this._setKb(true);
+      this._moveCursor(...ARROWS[e.key]);
+      this._renderMarks();
+      return;
+    }
+    if (e.key !== 'Enter' && e.key !== ' ') return;
+    e.preventDefault();
+    if (!this.movable || this.gPromo.childElementCount) return;
+    this._setKb(true);
+    if (!this.cursor) { this._moveCursor(0, 0); this._renderMarks(); return; }
+    const sq = this.cursor;
+    if (this.selected && this.selected !== sq && this._tryMove(this.selected, sq)) return;
+    const piece = this.pieces.get(sq);
+    if (piece && piece.color === this.movable && this.selected !== sq) this._select(sq);
+    else this._select(null);
   }
 
   _down(e) {
     if (e.button !== 0 && e.pointerType === 'mouse') return;
+    this._setKb(false);
     if (!this.movable || this.gPromo.childElementCount) return;
     const hit = this._sqAt(e.clientX, e.clientY);
     if (!hit) return;

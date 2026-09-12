@@ -10,7 +10,7 @@ import path from 'node:path';
 
 import { parseArrays, floatToHalf, halfToFloat, decodeF16 } from '../engine/loader.js';
 import { FlyBrain, policyForLegal, argmax, sampleIndex, topK, erf } from '../engine/flybrain.js';
-import { runMCTS } from '../engine/mcts.js';
+import { runMCTS, runMCTSAsync, createSearch } from '../engine/mcts.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const chessPath = path.join(here, '..', 'vendor', 'chess.js');
@@ -299,4 +299,50 @@ test('MCTS reports no move on a finished game', { skip: !existsSync(chessPath) &
   const chess = new Chess('7k/5Q2/6K1/8/8/8/8/8 b - - 0 1');   // black is checkmated
   const out = runMCTS(stubBrain(0), chess, enc, { sims: 10 });
   assert.equal(out.move, null);
+});
+
+test('MCTS treats a threefold repetition as a draw even when chess.js\' hash counter misses it', { skip: !existsSync(chessPath) && 'web/vendor/chess.js not present' }, async () => {
+  const { Chess } = await import(chessPath);
+  const enc = await import(encPath);
+  // d2d4 sets an ep square chess.js hashes although e4xd3 is illegal (Ra4 pins the pawn): the
+  // position after the third Nb1 is a threefold repetition for python-chess / FIDE but not for chess.js
+  const chess = new Chess('6n1/8/8/8/R3p2k/8/3P4/1N5K w - - 0 1');
+  for (const u of 'd2d4 g8f6 b1c3 f6g8 c3b1 g8f6 b1c3 f6g8 c3b1'.split(' ')) chess.move(enc.uciToMove(u));
+  assert.equal(chess.isThreefoldRepetition(), false);
+  const out = runMCTS(stubBrain(0.9), chess, enc, { sims: 20 });
+  assert.equal(out.move, null, 'the root is terminal (draw)');
+  assert.equal(out.rootValue, 0);
+  assert.equal(out.sims, 0);
+  // one ply earlier the drawing move must be scored 0 for the mover, not the brain's +0.9 leaf value
+  chess.undo();
+  const search = createSearch(stubBrain(0.9), chess, enc, { sims: 40 });
+  while (search.step()) { /* run */ }
+  const res = search.result();
+  const draw = res.visits.find((v) => v.uci === 'c3b1');
+  assert.ok(draw && draw.n > 0);
+  assert.ok(Math.abs(draw.q) < 1e-9, `Nb1 repeats the position: q must be 0, got ${draw.q}`);
+  assert.equal(chess.history().length, 8, 'the board is restored after the search');
+});
+
+test('runMCTSAsync matches runMCTS and stops early on shouldStop', { skip: !existsSync(chessPath) && 'web/vendor/chess.js not present' }, async () => {
+  const { Chess } = await import(chessPath);
+  const enc = existsSync(encPath) ? await import(encPath) : fallbackEnc;
+  const chess = new Chess();
+  const sync = runMCTS(stubBrain(0.1), chess, enc, { sims: 30, rnd: rng(3) });
+  const async = await runMCTSAsync(stubBrain(0.1), new Chess(), enc, { sims: 30, rnd: rng(3), yieldEvery: 7 });
+  assert.equal(async.stopped, false);
+  assert.equal(async.sims, 30);
+  assert.deepEqual(async.visits, sync.visits);
+  assert.equal(async.move, sync.move);
+  // cancel after the first batch: the search stops within one batch, the board is left at the root
+  let calls = 0;
+  const progress = [];
+  const stopped = await runMCTSAsync(stubBrain(0.1), chess, enc, {
+    sims: 200, yieldEvery: 10, shouldStop: () => ++calls >= 2, onProgress: (d) => progress.push(d),
+  });
+  assert.equal(stopped.stopped, true);
+  assert.ok(stopped.sims >= 10 && stopped.sims <= 20, `ran ${stopped.sims} sims`);
+  assert.equal(progress.at(-1), stopped.sims);
+  assert.ok(stopped.move, 'a best-so-far move is still reported');
+  assert.equal(chess.history().length, 0);
 });

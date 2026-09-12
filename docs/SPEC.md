@@ -42,7 +42,7 @@ fly-chess/
       config.py             # BrainConfig dataclass, yaml (de)serialisation
     data/
       lichess.py            # download monthly PGN .zst, stream-parse, filter, write shards
-      shards.py             # npz/parquet shard format (§5), PositionDataset, collate
+      shards.py             # npz/parquet shard format (§5), ShardDataset, collate
     train/
       metrics.py            # MetricsLogger: JSONL appends to runs/<run>/metrics.jsonl (§7)
       imitation.py          # stage 1 supervised trainer
@@ -65,7 +65,7 @@ fly-chess/
   web/                      # static website (GitHub Pages / any static host)
     index.html, style.css, app.js
     engine/encoding.js, engine/flybrain.js, engine/mcts.js, engine/worker.js, engine/loader.js
-    vendor/chess.js         # vendored (MIT)
+    vendor/chess.js         # vendored (BSD-2-Clause)
     assets/                 # piece SVGs, fly sprites, sounds
     model/                  # gitignored; produced by `fly export-web`
     test/parity.test.mjs    # node test: JS engine == Python vectors
@@ -135,14 +135,19 @@ class BrainGraph:
 ```
 Sign rule (Dale's law, fly): `ACH → +1`, `GABA → -1`, `GLUT → -1` (glutamate is predominantly
 inhibitory in the fly CNS via GluCl), `DA/SER/OCT/unknown → +1` (modulatory, treated excitatory).
-Neurons with no annotated nt keep +1.
+The sign is a property of the presynaptic *neuron*, never of a single synapse: a neuron carries one
+sign on every outgoing connection (Dale's law; `BrainGraph.validate()` asserts it). Neurons with no
+`nt_type` in `neurons.csv` (~14%) get one label from the synapse-count-weighted majority of the
+per-connection `nt_type` predictions over *all* their outgoing connections in the full connectome
+(`neuron_nt_type`; ties alphabetical; independent of the selected subgraph); a neuron with no
+labelled outgoing connection at all keeps +1.
 
 Selection (`build_brain_graph(conn, cfg: GraphConfig)`), `GraphConfig` fields:
 - `region: 'full' | 'central'` — `central` drops `super_class in {optic, visual_projection, visual_centrifugal}`.
 - `max_neurons: int | None` — if set, keep the top-k neurons by total synapse count (in+out),
   but *always* keep the input and output sets.
 - `min_syn: int = 5`
-- `input_super_classes: ['sensory', 'ascending']`, `max_inputs: 2048` — choose deterministically:
+- `input_super_classes: ['sensory', 'ascending', 'sensory_ascending']`, `max_inputs: 2048` — choose deterministically:
   sort candidates by (out-degree desc, root_id) and take the first `max_inputs`.
 - `output_super_classes: ['descending', 'motor']`, `max_outputs: 2048` — same rule with in-degree.
 - Remove self-loops; remove neurons with zero degree after filtering (except input/output sets).
@@ -200,6 +205,7 @@ class BrainConfig:
     weight_init_scale: float = 1.0   # multiplies log1p(syn_count) init
     dale: bool = True         # enforce signs
     dtype: str = 'float32'
+    value_hidden: int = 256   # hidden width of the value MLP (0 = plain Linear(n_out, 1))
 ```
 Parameters:
 - `syn_gain: (nnz,)` — `w = sign * softplus(syn_gain)`; init `syn_gain = inverse_softplus(scale * log1p(syn_count) / normaliser)`
@@ -231,13 +237,21 @@ Internally keep the hidden state as `(n, B)` (neuron-major) for cuSPARSE; expose
 ## 5. Data (`data/`)
 
 - `fly download --games --months 2014-01,2014-02` downloads `lichess_db_standard_rated_<YYYY-MM>.pgn.zst` into `data/pgn/`.
-- `data/lichess.py::build_shards(pgn_paths, out_dir, min_elo=1800, max_positions=None, skip_openings=4, workers=N)`
+- `data/lichess.py::build_shards(pgn_paths, out_dir, min_elo=1800, max_positions=None, skip_openings=4, workers=N, val_every=0)`
   streams games with `zstandard` + `chess.pgn`, keeps rated standard games where both players ≥ `min_elo`
   and the game has a decisive or drawn result, skips the first `skip_openings` plies, and writes shards of
   `SHARD_SIZE=262144` positions as `data/shards/<name>-NNNNN.npz` with arrays:
   `planes: uint8 (S, 20, 8, 8)` (planes 18/19 stored as uint8 0-255 / 0-1 and rescaled on load),
   `move: int16 (S,)`, `value: int8 (S,)`, `elo: int16 (S,)`, `ply: int16 (S,)`.
   Positions are shuffled globally across the month using a buffer before sharding.
+- Validation hold-out (`val_every=k`, `fly build-shards --val-every 50` by default): one game in `k`, chosen by a
+  stable hash (`zlib.crc32`) of its `Site` URL, is routed *whole* into a second series `<name>.val-NNNNN.npz`
+  (its own shuffle pool). The val set is therefore deterministic, reproducible across builder workers and
+  disjoint from training **at the game level** — a shard-level split of position-shuffled shards is not (the
+  other ~70 positions of every val game, with the same value label, would sit in training shards).
+  `shards.list_shards(dir, name)` only ever returns `<name>-NNNNN.npz` (never a `.val` series, also with
+  `name=None`); `load_split` returns the `.val` series when present (ignoring `val_fraction`) and otherwise
+  falls back to holding out whole shards with a warning.
 - `data/shards.py::ShardDataset` (torch IterableDataset, shard-level shuffle, worker-sharded) and `collate`.
 - Also provide `positions_from_pgn(path)` generator for tests.
 
@@ -256,7 +270,8 @@ Checkpoints: `runs/<run>/ckpt-<step>.pt` + `runs/<run>/latest.pt` containing
 Stage 1 (imitation): cross-entropy on the human move (label smoothing 0.0) + MSE on value. Log every 20 steps.
 Stage 2 (self-play): generate games with batched MCTS (`mcts.py`, all leaf evaluations batched through the GPU,
 virtual loss, Dirichlet noise at root, temperature 1 for first 30 plies then 0), store (planes, π, z) in a replay
-buffer, train on samples. Also periodically play `eval_games` against the previous checkpoint & RandomPlayer and log Elo.
+buffer, train on samples. Also every `selfplay_eval_every_iters` iterations play `elo_games` against the previous
+checkpoint & RandomPlayer and log Elo (during imitation a quick Elo runs every `elo_every` steps; 0 disables it).
 
 Python API: `flychess.train(run='fly1', stage='all', **overrides)`.
 
@@ -280,21 +295,27 @@ for each array, in this order: `csr_indptr (i32)`, `csr_indices (i32)`, `w (f16,
 `b_in (f32)`, `policy_w (f16, [num_moves, n_out])`, `policy_b (f32)`, `value_w (f16, [1 or hidden, n_out])`, `value_b`,
 (if MLP value head, also `value_w2`, `value_b2`), plus `positions (f16, [n,3])` normalised to [0,1] for the brain visualiser,
 and `super_class (u8, [n])` with a legend in the header. Header also has `steps, activation, n, nnz, n_in, n_out, num_moves,
-num_planes, run_name, train_steps, exported_at, elo_estimates`.
+num_planes, run_name, train_steps, exported_at, elo_estimates, total_bytes, gzip_bytes, blob_sha256`; the loader verifies every
+downloaded (and every cached) blob against `total_bytes` / `blob_sha256` and versions blob URLs by the header so a stale HTTP cache
+can never pair a new header with old bytes.
 Offsets are 8-byte aligned. `csr_indices` is stored as-is (i32) — simplicity over size. Target ≤ 45 MB raw for the full brain;
 `export-web` also writes `brain.flyb.gz` and the loader fetches the `.gz` when present, decoding with `DecompressionStream('gzip')`
 while streaming progress via `response.body.getReader()`, then caches the decoded buffer in the Cache API / IndexedDB.
 Measured in-browser cost: ~4 ms per recurrent timestep for 3M synapses in plain JS → ~35 ms per forward pass at 8 steps.
 JS `FlyBrain.forward(planesFloat32) -> {policy: Float32Array(4168), value: number, activity: Float32Array(n)}` must match
-Python within `1e-2` on logits for the vectors in `tests/vectors/model.json` (`{fen, top5: [[idx, logit]], value}`),
-generated by `export/testvectors.py` from the exported f16 weights (so both sides use identical rounded weights).
+Python within `1e-2` on the compared logits and the value for the vectors in `tests/vectors/model.json`, generated by
+`export/testvectors.py` from the exported f16 weights (so both sides use identical rounded weights). The file has a
+header (`format: 'flychess-model-vectors', version, run_name, exported_at, blob_sha256, generated_at, tolerance`) and a
+`vectors` list of `{fen, moves?, n_legal, argmax, top: [[idx, uci, logit], ...], value}` where `top` holds the `TOP_K = 20`
+legal moves with the highest logit; the parity test compares those logits, the value and the argmax (illegal moves and
+the remaining legal logits are not compared).
 
 ## 9. CLI (`cli.py`)
 
 ```
 fly download [--connectome] [--games] [--months 2014-01,...]        # defaults: both
 fly build-brain [--region full|central] [--max-neurons N] [--out data/brain/<name>.npz]
-fly build-shards [--months ...] [--min-elo 1800] [--workers 16]
+fly build-shards [--months ...] [--min-elo 1800] [--workers 16] [--val-every 50]
 fly train --run NAME [--stage imitation|selfplay|all] [--config cfg.yaml] [--resume] [--steps N] [--tiny]
 fly dashboard [--run NAME] [--port 8765]                            # http://localhost:8765
 fly play [--run NAME | --ckpt path] [--difficulty larva|fly|superfly] [--color white|black] [--gui]
@@ -308,7 +329,9 @@ Difficulty: `larva` = sample policy with temperature 1.2 (no search); `fly` = ar
 ## 10. Dashboard (`dashboard/`)
 
 `fly dashboard --run NAME` serves `static/index.html` at `/`, `GET /api/runs` (list runs), `GET /api/run/<name>`
-(run.json + last 5000 metrics), `WS /ws/<name>` (pushes each new metrics line). UI: run selector; live charts
+(run.json + per-kind history: the whole train / eval / Elo series, last game + activity, log tail), `WS /ws/<name>[?after=N]`
+(init, then each new metrics line followed by a byte cursor; `after` resumes a reconnect without resetting the UI).
+UI: run selector; live charts
 (loss / policy / value / top-k / lr / throughput / Elo) using a small vendored charting lib or hand-rolled canvas;
 status bar (stage, step, ETA, GPU mem); latest self-play game rendered on a board (auto-replay); neuron activity
 heatmap (positions from graph → 2D projection); log tail. Dark theme, fly-themed accents. No build step.
@@ -324,5 +347,6 @@ picker), fly avatar with mood driven by the value head (confident / nervous / pa
 canvas showing sampled neuron activity as glowing dots at connectome positions, move commentary from the
 policy/value ("the fly is 87% sure about this one"), share-result card (canvas → PNG copy), local leaderboard
 (localStorage), sound effects (optional toggle), party mode (pass-and-play tournament bracket vs. the fly, multiple
-humans take turns, fastest win wins). Mobile-friendly. Footer credits FlyWire (CC-BY 4.0) with citations.
+humans take turns, fastest win wins). Mobile-friendly. Footer credits FlyWire (data CC BY-NC 4.0 from Codex; the
+Zenodo mirror 10.5281/zenodo.10676866 is CC BY 4.0) with citations.
 `scripts/deploy-pages.sh` publishes `web/` (with `web/model/`) to a `gh-pages` branch; model files ≤ 100 MB each.

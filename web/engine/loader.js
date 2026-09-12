@@ -101,9 +101,18 @@ export function parseArrays(header, buffer) {
   return arrays;
 }
 
+/**
+ * Version tag of an export: keys the Cache API entry *and* the query string of every blob request,
+ * so a re-deployed brain.flyb(.gz) can never be served from a stale HTTP cache (static hosts send
+ * `Cache-Control: max-age=…`; the query string is ignored by the server but keys the browser cache).
+ */
+export function versionTag(header) {
+  const id = header.blob_sha256 ? String(header.blob_sha256).slice(0, 16) : (header.nnz || '');
+  return `${header.run_name || 'brain'}@${header.exported_at || ''}#${id}`;
+}
+
 function cacheKey(baseUrl, header) {
-  const tag = `${header.run_name || 'brain'}@${header.exported_at || ''}#${header.nnz || ''}`;
-  return `${baseUrl}brain.flyb?v=${encodeURIComponent(tag)}`;
+  return `${baseUrl}brain.flyb?v=${encodeURIComponent(versionTag(header))}`;
 }
 
 async function cacheGet(key) {
@@ -113,6 +122,48 @@ async function cacheGet(key) {
     const r = await c.match(key);
     return r ? await r.arrayBuffer() : null;
   } catch { return null; }
+}
+
+async function cacheDelete(key) {
+  try {
+    if (typeof caches === 'undefined') return;
+    const c = await caches.open('flychess-brain-v1');
+    await c.delete(key);
+  } catch { /* ignore */ }
+}
+
+function hex(buf) {
+  const b = new Uint8Array(buf);
+  let s = '';
+  for (let i = 0; i < b.length; i++) s += (b[i] < 16 ? '0' : '') + b[i].toString(16);
+  return s;
+}
+
+/**
+ * Check a blob against the header it is supposed to belong to. Returns a description of the
+ * problem, or null when the blob is consistent. `padded` allows up to 7 trailing alignment bytes
+ * (the loader pads cached blobs to a multiple of 8). When the header carries `blob_sha256` and
+ * WebCrypto is available the digest is verified too, which also catches same-size stale blobs.
+ * @param {object} header
+ * @param {ArrayBuffer} buffer
+ * @param {{padded?: boolean}} [opts]
+ * @returns {Promise<string|null>}
+ */
+export async function blobProblem(header, buffer, { padded = false } = {}) {
+  const total = Number(header.total_bytes) || 0;
+  const len = buffer.byteLength;
+  if (total) {
+    const ok = padded ? len >= total && len < total + 8 : len === total;
+    if (!ok) return `brain.flyb is ${len} bytes but brain.json says ${total}`;
+  }
+  const want = header.blob_sha256;
+  if (want && typeof crypto !== 'undefined' && crypto.subtle?.digest) {
+    const body = total && len !== total ? buffer.slice(0, total) : buffer;
+    let got;
+    try { got = hex(await crypto.subtle.digest('SHA-256', body)); } catch { return null; }
+    if (got !== String(want).toLowerCase()) return `brain.flyb sha256 ${got.slice(0, 12)}… does not match brain.json (${String(want).slice(0, 12)}…)`;
+  }
+  return null;
 }
 
 async function cachePut(key, buffer) {
@@ -165,7 +216,7 @@ async function readGzipWithProgress(response, total, onProgress) {
 
 async function probe(url) {
   try {
-    const r = await fetch(url, { method: 'HEAD' });
+    const r = await fetch(url, { method: 'HEAD', cache: 'no-cache' });
     if (!r.ok) return null;
     return { ok: true, size: Number(r.headers.get('content-length')) || 0 };
   } catch { return null; }
@@ -182,15 +233,23 @@ export async function loadBrain(baseUrl = 'model/', onProgress) {
   const hr = await fetch(baseUrl + 'brain.json', { cache: 'no-cache' });
   if (!hr.ok) throw new Error(`cannot fetch ${baseUrl}brain.json (${hr.status}) — run \`fly export-web\` first`);
   const header = await hr.json();
-  onProgress?.(0, header.gzip_bytes || header.blob_bytes || 0, 'header', header);
+  onProgress?.(0, header.gzip_bytes || header.total_bytes || 0, 'header', header);
   const key = cacheKey(baseUrl, header);
+  // Every blob request is versioned by the header and revalidated (`no-cache`), so a stale HTTP
+  // cache can never pair the new header with old bytes (see versionTag).
+  const v = '?v=' + encodeURIComponent(versionTag(header));
 
   let buffer = await cacheGet(key);
+  if (buffer && await blobProblem(header, buffer, { padded: true })) {
+    // a poisoned Cache API entry (stale blob stored under this key): drop it and re-download
+    await cacheDelete(key);
+    buffer = null;
+  }
   let fromCache = !!buffer;
   if (!buffer) {
-    const gz = header.gzip_bytes !== undefined || header.has_gzip ? { ok: true, size: header.gzip_bytes || 0 } : await probe(baseUrl + 'brain.flyb.gz');
+    const gz = header.gzip_bytes !== undefined || header.has_gzip ? { ok: true, size: header.gzip_bytes || 0 } : await probe(baseUrl + 'brain.flyb.gz' + v);
     if (gz && gz.ok) {
-      const r = await fetch(baseUrl + 'brain.flyb.gz').catch(() => null);
+      const r = await fetch(baseUrl + 'brain.flyb.gz' + v, { cache: 'no-cache' }).catch(() => null);
       if (r && r.ok) {
         const total = Number(r.headers.get('content-length')) || gz.size || header.gzip_bytes || 0;
         try {
@@ -201,11 +260,13 @@ export async function loadBrain(baseUrl = 'model/', onProgress) {
       }
     }
     if (!buffer) {
-      const r = await fetch(baseUrl + 'brain.flyb');
+      const r = await fetch(baseUrl + 'brain.flyb' + v, { cache: 'no-cache' });
       if (!r.ok) throw new Error(`cannot fetch brain.flyb (${r.status})`);
-      const total = Number(r.headers.get('content-length')) || header.blob_bytes || 0;
+      const total = Number(r.headers.get('content-length')) || header.total_bytes || 0;
       buffer = await readWithProgress(r, total, (l, t) => onProgress?.(l, t, 'download', header));
     }
+    const problem = await blobProblem(header, buffer);
+    if (problem) throw new Error(`${problem} — model files out of sync, reload the page`);
     if (buffer.byteLength % 8 !== 0) {
       // keep alignment guarantees for typed-array views
       const padded = new ArrayBuffer(Math.ceil(buffer.byteLength / 8) * 8);

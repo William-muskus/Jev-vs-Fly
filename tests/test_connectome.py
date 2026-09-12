@@ -22,6 +22,8 @@ from flychess.connectome import (
     build_brain_graph,
     edge_signs,
     load_or_build,
+    neuron_nt_type,
+    toy_graph,
 )
 from flychess.connectome import download as dl
 from flychess.connectome.load import aggregate_connections, load_connectome, parse_connectome
@@ -173,12 +175,28 @@ def test_nt_sign_table():
     assert NT_SIGN == {"ACH": 1, "GABA": -1, "GLUT": -1, "DA": 1, "SER": 1, "OCT": 1, "": 1}
 
 
-def test_edge_signs_fallback():
-    pre_nt = np.array(["ACH", "GABA", "GLUT", "DA", "", "", "", "WEIRD"])
-    edge_nt = np.array(["GABA", "ACH", "ACH", "GABA", "GABA", "ACH", "", "GABA"])
-    s = edge_signs(pre_nt, edge_nt)
-    assert s.tolist() == [1, -1, -1, 1, -1, 1, 1, 1] and s.dtype == np.int8
-    assert edge_signs(pre_nt).tolist() == [1, -1, -1, 1, 1, 1, 1, 1]  # no edge fallback -> +1
+def test_edge_signs_is_per_neuron_only():
+    pre_nt = np.array(["ACH", "GABA", "GLUT", "DA", "SER", "OCT", "", "WEIRD"])
+    s = edge_signs(pre_nt)
+    assert s.tolist() == [1, -1, -1, 1, 1, 1, 1, 1] and s.dtype == np.int8
+    assert edge_signs(np.array([], dtype=str)).shape == (0,)
+    with pytest.raises(TypeError):  # the per-synapse fallback is gone for good (Dale's law)
+        edge_signs(pre_nt, np.array(["GABA"] * 8))
+
+
+def test_neuron_nt_type_majority_rule():
+    #        0 ACH (annotated, edge predictions ignored), 1..4 unannotated, 5 unannotated & no edges
+    nt = np.array(["ACH", "", "", "", "", ""])
+    pre = np.array([0, 0, 1, 1, 1, 2, 2, 3, 3, 4], dtype=np.int32)
+    edge_nt = np.array(["GABA", "GABA", "ACH", "GABA", "GABA", "ACH", "GABA", "", "", "GLUT"])
+    syn = np.array([50, 50, 10, 3, 3, 7, 7, 9, 9, 1], dtype=np.int32)
+    out = neuron_nt_type(nt, pre, edge_nt, syn)
+    assert out.tolist() == ["ACH", "ACH", "ACH", "", "GLUT", ""]
+    #  1: ACH 10 > GABA 6 (synapse-weighted, not vote-counted); 2: 7 vs 7 -> alphabetical tie-break;
+    #  3: only empty predictions -> stays '' (+1); 4: single GLUT edge; 5: no outgoing edge at all
+    assert out.dtype.kind == "U" and nt.tolist() == ["ACH", "", "", "", "", ""]  # input untouched
+    assert neuron_nt_type(nt, pre, None, syn).tolist() == nt.tolist()             # no predictions
+    assert neuron_nt_type(np.array([], dtype=str), pre[:0], edge_nt[:0], syn[:0]).shape == (0,)
 
 
 def test_build_sign_uses_presynaptic_neuron():
@@ -190,6 +208,74 @@ def test_build_sign_uses_presynaptic_neuron():
     g = build_brain_graph(conn, GraphConfig(max_inputs=0, max_outputs=0))
     m = dense(g)
     assert m[1, 0] == -5 and m[0, 1] == 5 and m[1, 2] == -5 and m[1, 3] == 5
+    assert g.meta["nt_fallback"]["unannotated_neurons"] == 2
+    assert g.meta["nt_fallback"]["resolved_by_majority"] == 2
+
+
+def test_build_unannotated_neuron_has_one_sign():
+    """Regression: an unannotated neuron with conflicting edge predictions must not get mixed signs."""
+    # neuron 0 unannotated: ACH (10 synapses) to 1, GABA (3 synapses) to 2 -> majority ACH -> both +1
+    conn = make_conn(
+        3, [(0, 1, 10), (0, 2, 3), (1, 2, 5)],
+        nt_type=["", "GABA", "ACH"], edge_nt=["ACH", "GABA", "GABA"],
+    )
+    cfg = GraphConfig(min_syn=1, max_inputs=0, max_outputs=0)
+    g = build_brain_graph(conn, cfg)
+    m = dense(g)
+    assert m[1, 0] == 10 and m[2, 0] == 3 and m[2, 1] == -5
+    # the mirror image: GABA carries more synapses -> both outgoing synapses inhibitory
+    conn = make_conn(
+        3, [(0, 1, 2), (0, 2, 8), (1, 2, 5)],
+        nt_type=["", "GABA", "ACH"], edge_nt=["ACH", "GABA", "GABA"],
+    )
+    m = dense(build_brain_graph(conn, cfg))
+    assert m[1, 0] == -2 and m[2, 0] == -8
+    # every pre-synaptic neuron of the tiny random graph ends up with a single sign
+    rng = np.random.default_rng(7)
+    n = 60
+    edges = {(int(a), int(b)): int(s) for a, b, s in
+             zip(rng.integers(0, n, 600), rng.integers(0, n, 600), rng.integers(5, 40, 600))}
+    edges = [(a, b, s) for (a, b), s in edges.items()]
+    conn = make_conn(n, edges, nt_type=rng.choice(["ACH", "GABA", ""], n).tolist(),
+                     edge_nt=rng.choice(["ACH", "GABA", "GLUT", ""], len(edges)).tolist())
+    g = build_brain_graph(conn, GraphConfig(max_inputs=0, max_outputs=0))
+    pos = np.bincount(g.csr_indices, weights=g.sign > 0, minlength=g.n)
+    neg = np.bincount(g.csr_indices, weights=g.sign < 0, minlength=g.n)
+    assert not np.any((pos > 0) & (neg > 0))
+    # ... and the sign is the one the per-neuron rule predicts
+    nt_neuron = neuron_nt_type(conn.nt_type, conn.pre, conn.edge_nt_type, conn.syn_count)
+    kept = (g.root_ids - RID0).astype(int)
+    assert np.array_equal(g.sign, edge_signs(nt_neuron[kept][g.csr_indices]))
+
+
+def test_nt_majority_is_independent_of_subgraph_selection():
+    """The label is voted on the FULL edge set, so pruning (min_syn / max_neurons) cannot flip it."""
+    # neuron 0 unannotated: ACH 2+2 synapses to 1 and 2 (below min_syn=5), GABA 6 synapses to 3
+    conn = make_conn(
+        4, [(0, 1, 2), (0, 2, 2), (0, 3, 6), (1, 3, 5), (2, 3, 5)],
+        nt_type=["", "ACH", "ACH", "ACH"], edge_nt=["ACH", "ACH", "GABA", "ACH", "ACH"],
+    )
+    cfg = GraphConfig(min_syn=1, max_inputs=0, max_outputs=0)
+    assert dense(build_brain_graph(conn, cfg))[3, 0] == -6  # GABA 6 > ACH 4 on the full set
+    cfg = GraphConfig(min_syn=5, max_inputs=0, max_outputs=0)
+    assert dense(build_brain_graph(conn, cfg))[3, 0] == -6  # same label after pruning the ACH edges
+    # flip the weights: ACH wins on the full set even though only the GABA edge survives min_syn=5
+    conn = make_conn(
+        4, [(0, 1, 4), (0, 2, 4), (0, 3, 6), (1, 3, 5), (2, 3, 5)],
+        nt_type=["", "ACH", "ACH", "ACH"], edge_nt=["ACH", "ACH", "GABA", "ACH", "ACH"],
+    )
+    g = build_brain_graph(conn, cfg)
+    assert dense(g)[3, 0] == 6 and g.meta["nt_fallback"]["resolved_by_majority"] == 1
+
+
+def test_validate_rejects_mixed_outgoing_signs():
+    g = build_brain_graph(make_conn(3, [(0, 1, 5), (0, 2, 5)], nt_type=["ACH", "ACH", "ACH"]),
+                          GraphConfig(max_inputs=0, max_outputs=0))
+    g.validate()
+    g.sign = g.sign.copy()
+    g.sign[1] = -1  # neuron 0 now excites 1 and inhibits 2
+    with pytest.raises(AssertionError, match="Dale"):
+        g.validate()
 
 
 # ---- graph.py: selection ---------------------------------------------------------------------------
@@ -400,6 +486,9 @@ def test_real_full_graph_validates():
     if not p.exists():
         pytest.skip("data/brain/full.npz not built (run `fly build-brain`)")
     g = BrainGraph.load(p)
+    if "nt_fallback" not in g.meta:
+        pytest.skip("data/brain/full.npz was built before the per-neuron nt rule (mixed outgoing signs); "
+                    "rebuild with `fly build-brain --force` once no run depends on it")
     g.validate()
     assert 130_000 <= g.n <= 140_000 and 2_600_000 <= g.nnz <= 2_800_000
     assert g.n_in == 2048 and g.n_out >= 1000
@@ -407,3 +496,12 @@ def test_real_full_graph_validates():
     assert set(g.meta["super_class_counts"]) >= {"optic", "central", "sensory", "descending", "motor"}
     assert 0.3 < g.meta["sign_counts"]["inhibitory"] / g.nnz < 0.5
     assert not np.isnan(g.position).any()
+
+
+def test_summary_distinguishes_connections_from_synapses():
+    """README/SPEC vocabulary: a CSR non-zero is a pre->post *connection*; synapses are sum(syn_count)."""
+    g = toy_graph(n=50, nnz=300, n_in=4, n_out=4, seed=1)
+    text = g.summary()
+    assert f"connections={g.nnz:,}" in text
+    assert f"synapses={int(g.syn_count.sum()):,}" in text
+    assert int(g.syn_count.sum()) > g.nnz  # every connection carries >= 5 synapses, so the two must differ

@@ -20,6 +20,8 @@ if TYPE_CHECKING:  # load.py imports pandas; keep graph.py importable without it
 
 # Dale's law in the fly CNS: acetylcholine excitatory, GABA and glutamate (GluCl) inhibitory,
 # monoamines treated as excitatory/modulatory. Unknown transmitter -> excitatory.
+# The sign is a property of the PRE-synaptic NEURON (one transmitter per neuron), never of a synapse:
+# see `neuron_nt_type` for how neurons without an annotation in neurons.csv get their single label.
 NT_SIGN = {"ACH": 1, "GABA": -1, "GLUT": -1, "DA": 1, "SER": 1, "OCT": 1, "": 1}
 
 
@@ -86,6 +88,10 @@ class BrainGraph:
         # no self loops
         rows = np.repeat(np.arange(n, dtype=np.int32), row_ends - row_starts)
         assert not np.any(rows == self.csr_indices), "self-loops are not allowed"
+        # Dale's law: every PRE-synaptic neuron has a single sign on all of its outgoing synapses
+        pos = np.bincount(self.csr_indices, weights=self.sign > 0, minlength=n)
+        neg = np.bincount(self.csr_indices, weights=self.sign < 0, minlength=n)
+        assert not np.any((pos > 0) & (neg > 0)), "Dale's law: a neuron has mixed outgoing signs"
 
     # ---- io ------------------------------------------------------------------------------------
     def save(self, path: str | Path) -> Path:
@@ -128,9 +134,10 @@ class BrainGraph:
         classes, counts = np.unique(self.super_class, return_counts=True)
         cls_str = ", ".join(f"{c}={k}" for c, k in zip(classes, counts))
         exc = int((self.sign > 0).sum())
+        total_syn = int(self.syn_count.sum())
         return (
-            f"BrainGraph(n={self.n:,}, synapses={self.nnz:,} [{exc:,} excitatory / {self.nnz - exc:,} inhibitory], "
-            f"inputs={self.n_in}, outputs={self.n_out}; {cls_str})"
+            f"BrainGraph(n={self.n:,}, connections={self.nnz:,} [{exc:,} excitatory / {self.nnz - exc:,} inhibitory], "
+            f"synapses={total_syn:,}, inputs={self.n_in}, outputs={self.n_out}; {cls_str})"
         )
 
 
@@ -178,16 +185,44 @@ def _pick_by_degree(candidates: np.ndarray, degree: np.ndarray, root_ids: np.nda
     return np.sort(candidates[order[:k]]).astype(np.int32)
 
 
-def edge_signs(pre_nt: np.ndarray, edge_nt: np.ndarray | None = None) -> np.ndarray:
-    """Dale's-law sign per synapse from the PRE-synaptic neuron's transmitter (`NT_SIGN`).
+def neuron_nt_type(nt_type: np.ndarray, pre: np.ndarray, edge_nt: np.ndarray | None,
+                   syn_count: np.ndarray) -> np.ndarray:
+    """One transmitter label per NEURON (Dale's law), `''` when nothing is known.
 
-    A neuron without an annotated transmitter falls back to the transmitter predicted for the edge
-    itself (`edge_nt`), and to +1 when neither is known.
+    Neurons annotated in neurons.csv (`nt_type != ''`) keep their label. An unannotated neuron gets
+    the `syn_count`-weighted majority of the per-connection predictions (`edge_nt`, one per
+    (pre, post) pair) over ALL of its outgoing connections, ties broken alphabetically; edges whose
+    own prediction is empty do not vote. Because the vote runs over the full edge set, a neuron's
+    label does not depend on which subgraph is later selected. A neuron stays `''` (-> +1) when it
+    has no labelled outgoing connection at all.
+    """
+    nt = np.asarray(nt_type).astype(str).copy()
+    if edge_nt is None or len(nt) == 0:
+        return nt
+    n = len(nt)
+    pre = np.asarray(pre)
+    edge_nt = np.asarray(edge_nt).astype(str)
+    vote = (nt[pre] == "") & (edge_nt != "")
+    if not vote.any():
+        return nt
+    labels, code = np.unique(edge_nt[vote], return_inverse=True)  # sorted -> argmax ties = alphabetical
+    k = len(labels)
+    nt = nt.astype(f"U{max(nt.dtype.itemsize, labels.dtype.itemsize) // 4}")  # room for the new labels
+    weight = np.asarray(syn_count)[vote].astype(np.float64)
+    tally = np.bincount(pre[vote].astype(np.int64) * k + code, weights=weight, minlength=n * k).reshape(n, k)
+    voted = tally.sum(1) > 0
+    nt[voted] = labels[tally[voted].argmax(1)]
+    return nt
+
+
+def edge_signs(pre_nt: np.ndarray) -> np.ndarray:
+    """Dale's-law sign per synapse from the PRE-synaptic NEURON's transmitter (`NT_SIGN`).
+
+    `pre_nt[k]` is the per-neuron label (see `neuron_nt_type`) of the pre-synaptic neuron of synapse
+    `k`; `''` and unknown labels map to +1. There is deliberately no per-synapse fallback: a neuron
+    must carry one sign on every outgoing synapse.
     """
     nt = np.asarray(pre_nt).astype(str)
-    if edge_nt is not None:
-        edge_nt = np.asarray(edge_nt).astype(str)
-        nt = np.where(nt == "", edge_nt, nt)
     uniq, inv = np.unique(nt, return_inverse=True)
     table = np.array([NT_SIGN.get(u, 1) for u in uniq], dtype=np.int8)
     return table[inv]
@@ -207,7 +242,9 @@ def build_brain_graph(conn: Connectome, cfg: GraphConfig) -> BrainGraph:
          (total synapse count in+out desc, root_id) so that n <= max_neurons;
       5. drop neurons that end up with zero degree, except inputs/outputs;
       6. rows = POST-synaptic neuron, columns sorted, i.e. entries ordered by (post, pre).
-    Sign comes from the PRE-synaptic neuron's transmitter (`edge_signs`), never learned.
+    Sign comes from the PRE-synaptic neuron's transmitter (`edge_signs`), never learned; neurons
+    without an annotation get one label from the synapse-weighted majority of their connection-level
+    predictions over the FULL connectome (`neuron_nt_type`), so every neuron has exactly one sign.
     """
     from flychess.connectome.load import Connectome  # local import: load.py depends on pandas
 
@@ -220,11 +257,13 @@ def build_brain_graph(conn: Connectome, cfg: GraphConfig) -> BrainGraph:
     if cfg.region == "central":
         keep_neuron &= ~np.isin(conn.super_class, CENTRAL_EXCLUDED)
 
+    # one transmitter per neuron, decided on the full edge set (independent of the selection below)
+    nt_neuron = neuron_nt_type(conn.nt_type, conn.pre, conn.edge_nt_type, conn.syn_count)
+
     # 2. edge filter
     pre, post, syn = conn.pre, conn.post, conn.syn_count
     e_keep = (syn >= cfg.min_syn) & keep_neuron[pre] & keep_neuron[post] & (pre != post)
     pre, post, syn = pre[e_keep], post[e_keep], syn[e_keep]
-    edge_nt = conn.edge_nt_type[e_keep] if conn.edge_nt_type is not None else None
 
     # 3. roles
     out_deg = np.bincount(pre, minlength=N)
@@ -248,7 +287,6 @@ def build_brain_graph(conn: Connectome, cfg: GraphConfig) -> BrainGraph:
         keep_neuron[others[order[:budget]]] = True
         e_keep = keep_neuron[pre] & keep_neuron[post]
         pre, post, syn = pre[e_keep], post[e_keep], syn[e_keep]
-        edge_nt = edge_nt[e_keep] if edge_nt is not None else None
 
     # 5. zero-degree removal (roles exempt)
     deg = np.bincount(pre, minlength=N) + np.bincount(post, minlength=N)
@@ -262,10 +300,9 @@ def build_brain_graph(conn: Connectome, cfg: GraphConfig) -> BrainGraph:
     pre_n, post_n = new_index[pre], new_index[post]
     order = np.lexsort((pre_n, post_n))
     pre_n, post_n, syn = pre_n[order], post_n[order], syn[order]
-    edge_nt = edge_nt[order] if edge_nt is not None else None
     indptr = np.zeros(n + 1, dtype=np.int64)
     np.cumsum(np.bincount(post_n, minlength=n), out=indptr[1:])
-    sign = edge_signs(conn.nt_type[kept][pre_n], edge_nt)
+    sign = edge_signs(nt_neuron[kept][pre_n])
 
     classes, counts = np.unique(conn.super_class[kept], return_counts=True)
     meta = {
@@ -276,6 +313,11 @@ def build_brain_graph(conn: Connectome, cfg: GraphConfig) -> BrainGraph:
         "n_out": len(output_glob),
         "super_class_counts": {str(c or ""): int(k) for c, k in zip(classes, counts)},
         "sign_counts": {"excitatory": int((sign > 0).sum()), "inhibitory": int((sign < 0).sum())},
+        "nt_fallback": {
+            "rule": "unannotated neuron -> syn_count-weighted majority of its edge nt predictions (one sign per neuron)",
+            "unannotated_neurons": int((conn.nt_type[kept] == "").sum()),
+            "resolved_by_majority": int(((conn.nt_type[kept] == "") & (nt_neuron[kept] != "")).sum()),
+        },
         "total_syn_count": float(syn.sum()),
         "connectome": {"neurons": int(N), "edges": int(conn.n_edges)},
         "sources": dict(conn.sources),

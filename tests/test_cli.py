@@ -49,7 +49,8 @@ def test_play_and_eval_args():
     a = build_parser().parse_args(["build-brain", "--tiny"])
     assert a.tiny and a.region == "full" and a.command == "build-brain"
     a = build_parser().parse_args(["build-shards", "--max-games", "3000", "--workers", "8", "--name", "smoke"])
-    assert a.max_games == 3000 and a.workers == 8 and a.name == "smoke"
+    assert a.max_games == 3000 and a.workers == 8 and a.name == "smoke" and a.val_every == 50
+    assert build_parser().parse_args(["build-shards", "--val-every", "0"]).val_every == 0
     a = build_parser().parse_args(["export-web", "--run", "r", "--quant", "i8", "--out", "/tmp/m"])
     assert a.quant == "i8" and a.out == "/tmp/m" and not a.no_vectors
     a = build_parser().parse_args(["dashboard", "--run", "r", "--port", "9999"])

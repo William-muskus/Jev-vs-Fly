@@ -5,13 +5,21 @@ the value head against the game result.  The shards (§5) do not store legal-mov
 MCTS / self-play, which mask illegal moves — imitation trains the unmasked softmax; the brain therefore
 also learns to put mass only on legal moves, and every eval/play path applies the legal mask on top.
 
-Optimiser: AdamW with weight decay on the matrices (``w_in``, heads, ``syn_gain``) and none on the 1-D
-per-neuron parameters (``bias``, ``leak_logit``, ``b_in``, head biases); linear warm-up then cosine decay
-to 10 % of ``lr`` over the planned number of steps.  bf16 autocast covers the dense parts only (the SpMM
+Optimiser: AdamW with weight decay on the dense matrices (``w_in``, heads) and none on the 1-D
+per-neuron parameters (``bias``, ``leak_logit``, ``b_in``, head biases) nor — under Dale's law — on
+``syn_gain``: there ``|w| = softplus(syn_gain)``, so decaying the *logit* toward 0 would pull every synapse
+toward ln 2 ≈ 0.69 (an order of magnitude above the initial magnitudes), i.e. toward a stronger, not sparser, connectome.  With
+``dale=False`` ``w = syn_gain`` itself and decay is a genuine shrinkage, so it stays on.  Linear warm-up
+then cosine decay to 10 % of ``lr`` over the planned number of steps.  bf16 autocast covers the dense parts only (the SpMM
 in :class:`FlyBrain` disables autocast internally and runs in fp32).
 
-Resuming continues the global step counter and the LR schedule; the data stream restarts from the
-epoch ``start_step // steps_per_epoch`` (positions inside that epoch are not skipped).
+Resuming continues the global step counter and the LR schedule, and the data stream continues where the
+checkpoint stopped: the epoch ``start_step // steps_per_epoch`` is re-iterated (the shard permutation and the
+in-shard shuffles are seeded by ``(seed, epoch, worker)``, so the loader reproduces the same batch sequence)
+and its first ``start_step % steps_per_epoch`` batches are skipped without training.  Without the skip a
+resumed one-epoch run would train twice on the prefix and never see the tail of the data.  The batch
+sequence is only reproducible for the same ``num_workers`` (shards are split across workers), so resuming
+with a different worker count skips the right *amount* of data but not exactly the same batches.
 """
 from __future__ import annotations
 
@@ -28,7 +36,7 @@ from torch import Tensor
 from torch.utils.data import DataLoader
 
 from flychess.connectome.graph import BrainGraph
-from flychess.data.shards import ShardDataset, collate, count_positions, load_split
+from flychess.data.shards import VAL_SUFFIX, ShardDataset, collate, count_positions, load_split, shard_series
 from flychess.model.flybrain import FlyBrain, metrics_to_float, policy_value_loss
 from flychess.train.config import TrainConfig
 from flychess.train.metrics import MetricsLogger
@@ -43,18 +51,64 @@ ADAM_BETAS = (0.9, 0.95)
 # ---------------------------------------------------------------------------------------------------
 # helpers
 # ---------------------------------------------------------------------------------------------------
-def param_groups(model: FlyBrain, weight_decay: float) -> list[dict[str, Any]]:
-    """Two AdamW groups: decayed matrices / synapse gains and un-decayed per-neuron biases & leaks."""
+def param_groups(model: FlyBrain, weight_decay: float,
+                 decay_syn_gain: bool | None = None) -> list[dict[str, Any]]:
+    """Two AdamW groups: decayed dense matrices and un-decayed per-neuron biases & leaks.
+
+    ``syn_gain`` joins the un-decayed group when the model enforces Dale's law (``|w| = softplus(gain)``:
+    shrinking the logit would push every synapse toward softplus(0) = ln 2, not toward 0) and the decayed
+    group otherwise (``w = gain``).  ``decay_syn_gain`` overrides that choice; ``True`` reproduces the
+    layout of checkpoints written before this rule (see :func:`adapt_optim_state`).
+    """
+    if decay_syn_gain is None:
+        decay_syn_gain = not bool(getattr(model, "dale", True))
     decay, no_decay = [], []
     for name, p in model.named_parameters():
         if not p.requires_grad:
             continue
         leaf = name.split(".")[-1]
-        if leaf in NO_DECAY_NAMES or (leaf == "bias" and p.dim() == 1):
+        if leaf in NO_DECAY_NAMES or (leaf == "bias" and p.dim() == 1) or (leaf == "syn_gain" and not decay_syn_gain):
             no_decay.append(p)
         else:
             decay.append(p)
     return [{"params": decay, "weight_decay": weight_decay}, {"params": no_decay, "weight_decay": 0.0}]
+
+
+def _legacy_layouts(model: FlyBrain, weight_decay: float) -> list[list[dict[str, Any]]]:
+    """Param-group layouts older checkpoints were saved with (``syn_gain`` decayed; self-play's single group)."""
+    return [param_groups(model, weight_decay, decay_syn_gain=True),
+            [{"params": [p for p in model.parameters() if p.requires_grad], "weight_decay": weight_decay}]]
+
+
+def adapt_optim_state(state: dict[str, Any], model: FlyBrain, weight_decay: float,
+                      groups: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    """Re-partition a checkpoint's AdamW ``param_groups`` into the current :func:`param_groups` layout.
+
+    ``Optimizer.load_state_dict`` pairs saved and live parameters positionally and refuses a state whose
+    group sizes differ, so a checkpoint written when ``syn_gain`` was still decayed (or by the old
+    single-group self-play optimizer) could not be resumed after the layout changed.  When the saved
+    layout matches one of the known legacy layouts, the per-parameter moments are kept and only the
+    group membership (and ``weight_decay``) is rewritten; anything else is returned unchanged.
+    """
+    groups = param_groups(model, weight_decay) if groups is None else groups
+    saved_groups = state.get("param_groups")
+    if not isinstance(saved_groups, list) or not saved_groups:
+        return state
+    saved_sizes = [len(g["params"]) for g in saved_groups]
+    if saved_sizes == [len(g["params"]) for g in groups]:
+        return state
+    for legacy in _legacy_layouts(model, weight_decay):
+        if [len(g["params"]) for g in legacy] != saved_sizes:
+            continue
+        saved_index = {id(p): i for g, sg in zip(legacy, saved_groups, strict=True)
+                       for p, i in zip(g["params"], sg["params"], strict=True)}
+        if any(id(p) not in saved_index for g in groups for p in g["params"]):
+            continue
+        hparams = {k: v for k, v in saved_groups[0].items() if k != "params"}
+        new_groups = [dict(hparams, params=[saved_index[id(p)] for p in g["params"]], weight_decay=g["weight_decay"])
+                      for g in groups]
+        return dict(state, param_groups=new_groups)
+    return state
 
 
 def make_optimizer(model: FlyBrain, cfg: TrainConfig, lr: float | None = None) -> torch.optim.AdamW:
@@ -233,6 +287,12 @@ def run_imitation_stage(
     if not val_files:
         print("[imitation] no validation shard (val_fraction=0 or a single shard): evaluating on a train shard")
         val_files = train_files[:1]
+    elif (shard_series(val_files[0]) or "").endswith(VAL_SUFFIX):
+        print(f"[imitation] validation set: {len(val_files)} game-level hold-out shard(s) "
+              f"({shard_series(val_files[0])}-*.npz, disjoint from training at the game level)")
+    else:
+        print(f"[imitation] validation set: {len(val_files)} held-out train shard(s) — NOT game-disjoint "
+              "(positions of one game sit on both sides); rebuild shards with `fly build-shards --val-every K`")
     n_train = count_positions(train_files)
     total_steps, steps_per_epoch = planned_steps(cfg, n_train)
     step = int(start_step)
@@ -250,7 +310,7 @@ def run_imitation_stage(
     optim = make_optimizer(model, cfg)
     if optim_state is not None:
         try:
-            optim.load_state_dict(optim_state)
+            optim.load_state_dict(adapt_optim_state(optim_state, model, cfg.weight_decay))
         except (ValueError, KeyError) as e:
             print(f"[imitation] optimizer state not restored ({e}); starting AdamW afresh")
         else:
@@ -281,14 +341,26 @@ def run_imitation_stage(
     do_eval(step)
     last_saved = -1
     epoch = step // steps_per_epoch  # also with epochs=0 (cycle until max_steps): continue the cycle on resume
+    # batches of that epoch already trained before the checkpoint: replay the (deterministic) loader past them
+    skip = step - epoch * steps_per_epoch
+    if skip:
+        print(f"[imitation] resuming inside epoch {epoch}: skipping its first {skip:,} batches "
+              f"({skip * cfg.batch_size:,} positions already trained)")
+        logger.log_status(step, message=f"resuming: skipping {skip:,} already-trained batches of epoch {epoch}",
+                          stage=STAGE, total_steps=total_steps, eta_s=None)
     t_window = time.perf_counter()
     pos_window = 0
     step_time_ema: float | None = None
     try:
         while step < total_steps:
             ds.set_epoch(epoch)
-            batches_this_epoch = 0
+            seen = 0  # batches yielded by the loader this epoch (skipped ones included)
             for batch in loader:
+                seen += 1
+                if seen <= skip:
+                    if seen == skip:  # the skip is over: pos/s and ETA measure training steps only
+                        t_window, pos_window = time.perf_counter(), 0
+                    continue
                 x, move, value_t = _to_device(batch, device)
                 lr = lr_at(step, cfg.lr, cfg.warmup_steps, total_steps)
                 set_lr(optim, lr)
@@ -301,7 +373,6 @@ def run_imitation_stage(
                     torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip)
                 optim.step()
                 step += 1
-                batches_this_epoch += 1
                 pos_window += int(x.shape[0])
 
                 if step % cfg.log_every == 0 or step == total_steps:
@@ -335,8 +406,12 @@ def run_imitation_stage(
                     side_work = True
                 if side_work:  # keep pos_per_sec / ETA a measure of training steps only
                     t_window, pos_window = time.perf_counter(), 0
-            if batches_this_epoch == 0:
+            if seen == 0:
                 raise RuntimeError(f"the training shards yielded no full batch of {cfg.batch_size} positions")
+            # `seen <= skip` (no batch trained) is legitimate: steps_per_epoch = n_train // batch_size slightly
+            # overestimates what a multi-worker loader with drop_last yields, so a checkpoint taken within a few
+            # steps of the epoch boundary can have consumed the whole epoch; training continues in the next one
+            skip = 0
             epoch += 1
         # the final eval / Elo run inside the try: a Ctrl-C there still saves the end-of-training weights
         do_eval(step)
@@ -361,6 +436,7 @@ def _gpu_mem_gb() -> float:
 
 __all__ = [
     "ValCache",
+    "adapt_optim_state",
     "evaluate",
     "lr_at",
     "make_loader",

@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import io
+import warnings
+import zlib
 from collections import Counter
 from pathlib import Path
 
@@ -16,6 +18,7 @@ from flychess.chessenv.encoding import encode_board, move_to_index
 from flychess.data.lichess import (
     GameFilter,
     build_shards,
+    is_val_game,
     iter_game_texts,
     parse_headers,
     positions_from_pgn,
@@ -26,8 +29,10 @@ from flychess.data.shards import (
     collate,
     count_positions,
     list_shards,
+    list_val_shards,
     load_split,
     read_shard,
+    shard_series,
     write_shard,
 )
 from flychess.paths import PGN_DIR
@@ -114,8 +119,8 @@ def test_positions_from_pgn_matches_reference_encoding():
 
 def test_process_block_stats():
     with open(FIXTURE) as f:
-        arrays, stats = process_block(f.read(), GameFilter())
-    assert stats["games_seen"] == 40
+        arrays, val_arrays, stats = process_block(f.read(), GameFilter())
+    assert stats["games_seen"] == 40 and stats["games_val"] == 0 == len(val_arrays.move)
     assert stats["games_kept"] + stats["games_short"] + stats["games_error"] < 40
     assert stats["positions"] == len(arrays.move) == len(list(positions_from_pgn(FIXTURE)))
     assert arrays.feats.shape == (stats["positions"], 19) and arrays.feats.dtype == np.uint64
@@ -215,6 +220,77 @@ def test_load_split(built):
     assert load_split(out, val_fraction=0.0) == (list_shards(out), [])
     with pytest.raises(FileNotFoundError):
         load_split(out / "nothing")
+    # a shard_name filter that matches nothing must say so (and that the directory is not empty)
+    with pytest.raises(FileNotFoundError, match=r"lichess2014-\*\.npz.*other \*\.npz.*shard_name"):
+        load_split(out, name="lichess2014")
+    with pytest.raises(FileNotFoundError, match=r"nope-\*\.npz.*shard_name"):
+        load_split(out / "nothing", name="nope")
+
+
+def _games_of_positions() -> dict[tuple, int]:
+    """(planes, move, value, elo, ply) -> game ordinal, from the generator's ply-reset boundaries."""
+    game_of: dict[tuple, int] = {}
+    gi, last_ply = -1, 10**9
+    for p in positions_from_pgn(FIXTURE):
+        if p.ply <= last_ply:  # ply restarts at skip_openings for every new game
+            gi += 1
+        last_ply = p.ply
+        game_of.setdefault((p.planes.tobytes(), p.move, p.value, p.elo, p.ply), gi)
+    return game_of
+
+
+def _games_in(files) -> Counter:
+    game_of = _games_of_positions()
+    c: Counter = Counter()
+    for f in files:
+        s = read_shard(f)
+        for i in range(len(s["move"])):
+            c[game_of[(s["planes"][i].tobytes(), int(s["move"][i]), int(s["value"][i]), int(s["elo"][i]),
+                       int(s["ply"][i]))]] += 1
+    return c
+
+
+def test_build_shards_game_level_holdout_is_disjoint(tmp_path):
+    """The shard-level split leaked every val game into training (positions are shuffled across shards);
+    `val_every` holds out whole games into a `<name>.val` series that `load_split` uses instead."""
+    stats = build_shards(FIXTURE, tmp_path, name="fx", workers=2, shard_size=100, shuffle_buffer=300,
+                         chunk_chars=4000, progress=False, val_every=4)
+    positions = list(positions_from_pgn(FIXTURE))
+    assert stats.games_val > 0 and stats.positions_val > 0 and stats.val_shards >= 1
+    assert stats.positions + stats.positions_val == len(positions)
+    assert stats.games_kept + stats.games_val == len(set(_games_of_positions().values()))
+    assert "val:" in stats.summary() and stats.to_dict()["val_shards"] == stats.val_shards
+    train_files, val_files = list_shards(tmp_path, "fx"), list_val_shards(tmp_path, "fx")
+    assert len(train_files) == stats.shards and len(val_files) == stats.val_shards
+    assert [f.name for f in val_files] == [f"fx.val-{i:05d}.npz" for i in range(len(val_files))]
+    assert [str(f) for f in val_files] == stats.val_shard_files
+    assert shard_series(val_files[0]) == "fx.val" and shard_series(train_files[0]) == "fx"
+    assert shard_series("fx-00000.npz.tmp123") is None and shard_series("notes.npz") is None
+    # the train glob must never sweep the val series back in (with or without a name filter)
+    assert not set(train_files) & set(val_files)
+    assert list_shards(tmp_path) == train_files and list_val_shards(tmp_path) == val_files
+    assert count_positions(tmp_path) == stats.positions and count_positions(val_files) == stats.positions_val
+    # games are disjoint between the two series ...
+    train_games, val_games = _games_in(train_files), _games_in(val_files)
+    assert val_games and not set(train_games) & set(val_games)
+    assert sum(val_games.values()) == stats.positions_val and len(val_games) == stats.games_val
+    # ... and load_split returns the val series (val_fraction is ignored) without the leak warning
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        assert load_split(tmp_path, val_fraction=0.5, seed=1, name="fx") == (train_files, val_files)
+        assert load_split(tmp_path, val_fraction=0.5, seed=1) == (train_files, val_files)
+    # the old shard-level fallback warns that it is not game-disjoint
+    build_shards(FIXTURE, tmp_path / "old", name="old", workers=2, shard_size=100, shuffle_buffer=300,
+                 chunk_chars=4000, progress=False)  # val_every=0: no val series
+    with pytest.warns(UserWarning, match="NOT game-disjoint"):
+        train, val = load_split(tmp_path / "old", val_fraction=0.25, seed=0, name="old")
+    assert val and set(_games_in(train)) & set(_games_in(val))  # documents the leak the val series avoids
+    # the hold-out choice is a stable hash of the Site header: same split in every worker / rebuild
+    text = next(iter_game_texts(FIXTURE))
+    h = parse_headers(text)
+    assert is_val_game(text, h, 4) == (zlib.crc32(h["Site"].encode()) % 4 == 0)
+    assert not is_val_game(text, h, 0)
+    assert is_val_game(text, {}, 4) == (zlib.crc32(text.encode()) % 4 == 0)  # no Site: keyed on the text
 
 
 @pytest.mark.slow

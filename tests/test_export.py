@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import gzip
+import hashlib
 import json
 import shutil
 import subprocess
@@ -67,6 +68,9 @@ def test_export_roundtrip_header_and_layout(model, graph, tmp_path):
         assert "scale" not in e
     assert header["arrays"][0]["offset"] == 0
     assert header["total_bytes"] == (tmp_path / "brain.flyb").stat().st_size
+    # the web loader verifies the blob it downloads against these
+    assert header["gzip_bytes"] == (tmp_path / "brain.flyb.gz").stat().st_size
+    assert header["blob_sha256"] == hashlib.sha256((tmp_path / "brain.flyb").read_bytes()).hexdigest()
     by_name = {e["name"]: e for e in header["arrays"]}
     assert by_name["w_in"]["shape"] == [graph.n_in, 1280]
     assert by_name["policy_w"]["shape"] == [96, graph.n_out]

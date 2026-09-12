@@ -11,7 +11,7 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from flychess.connectome.graph import toy_graph
-from flychess.dashboard.server import _safe_name, create_app
+from flychess.dashboard.server import RunIndex, _safe_name, create_app
 from flychess.train.metrics import MetricsLogger, iter_lines_reversed, list_runs, read_metrics, read_run_json
 
 
@@ -164,6 +164,8 @@ def test_http_endpoints(runs_dir: Path) -> None:
         assert r.status_code == 200 and "fly-chess" in r.text and "dashboard.js" in r.text
         assert client.get("/static/dashboard.js").status_code == 200
         assert client.get("/static/dashboard.css").status_code == 200
+        assert client.get("/static/chartmath.js").status_code == 200
+        assert r.text.index("/static/chartmath.js") < r.text.index("/static/dashboard.js")  # helpers load first
 
         assert client.get("/api/default").json()["run"] == "alpha"
 
@@ -186,15 +188,79 @@ def test_http_endpoints(runs_dir: Path) -> None:
         assert client.get("/api/run/alpha/positions").json()["available"] is False
 
 
-def test_api_run_caps_at_5000_lines(tmp_path: Path) -> None:
-    root = tmp_path / "runs"
-    log = MetricsLogger(root / "big")
-    for i in range(5200):
-        log.log("train", i, loss=1.0)
+def _fill_dense(root: Path, name: str, n_train: int, status_every: int = 1) -> None:
+    """A run whose dense train/status logging would push sparse kinds out of any fixed-size tail."""
+    log = MetricsLogger(root / name, rate_limits={"game": 0.0, "activity": 0.0})
+    log.log_elo(0, opponent="random", games=4, wins=2, draws=1, losses=1, elo_estimate=12.0)
+    log.log_game(0, pgn="1. e4 e5 *", result="*", moves=2, source="eval")
+    log.log_activity(0, neuron_idx=[0, 1], values=[0.5, 0.25])
+    log.log_eval(0, val_loss=9.0, val_top1=0.0, val_top3=0.0, val_value_mse=1.0)
+    for i in range(n_train):
+        log.log("train", i, loss=8.0 - 7.0 * i / max(1, n_train - 1), lr=1e-3, stage="imitation")
+        if i % status_every == 0:
+            log.log_status(i, message=f"s{i}", stage="imitation", total_steps=n_train, eta_s=1.0)
     log.close()
+
+
+def test_api_run_sends_whole_series_per_kind(tmp_path: Path) -> None:
+    """The init is per kind (whole train / eval / elo series, last game + activity, last status lines) rather than
+    a global tail of 5000 records: a reload must show the whole run and never lose the sparse kinds."""
+    root = tmp_path / "runs"
+    _fill_dense(root, "big", n_train=6000)
     with TestClient(create_app(runs_dir=root)) as client:
-        m = client.get("/api/run/big").json()["metrics"]
-        assert len(m) == 5000 and m[0]["step"] == 200 and m[-1]["step"] == 5199
+        data = client.get("/api/run/big").json()
+        m = data["metrics"]
+        by_kind: dict[str, list[dict]] = {}
+        for r in m:
+            by_kind.setdefault(r["kind"], []).append(r)
+        train = by_kind["train"]
+        assert len(train) == 6000 and train[0]["step"] == 0 and train[-1]["step"] == 5999  # the *whole* series
+        assert train[0]["loss"] == pytest.approx(8.0) and train[-1]["loss"] == pytest.approx(1.0)
+        assert len(by_kind["status"]) == 200 and by_kind["status"][-1]["step"] == 5999  # only the log tail
+        assert [r["step"] for r in by_kind["elo"]] == [0] and [r["step"] for r in by_kind["eval"]] == [0]
+        assert len(by_kind["game"]) == 1 and len(by_kind["activity"]) == 1  # sparse kinds survive dense logging
+        assert [r["kind"] for r in m[:4]] == ["elo", "game", "activity", "eval"]  # file order is preserved
+        assert data["offset"] == (root / "big" / "metrics.jsonl").stat().st_size
+        assert data["counts"] == {"train": 6000, "status": 6000, "elo": 1, "game": 1, "activity": 1, "eval": 1}
+
+
+def test_run_index_is_incremental_and_handles_truncation(tmp_path: Path) -> None:
+    root = tmp_path / "runs"
+    _fill_dense(root, "r", n_train=30)
+    path = root / "r" / "metrics.jsonl"
+    idx = RunIndex(path, status_lines=5)
+    metrics, offset, counts = idx.load()
+    assert offset == path.stat().st_size and counts["train"] == 30
+    assert sum(r["kind"] == "train" for r in metrics) == 30 and sum(r["kind"] == "status" for r in metrics) == 5
+
+    # append (plus a torn last line): only the new bytes are parsed, the torn line waits for the writer
+    with open(path, "ab") as f:
+        f.write(json.dumps({"t": 1.0, "step": 30, "kind": "train", "loss": 0.5}).encode() + b"\n")
+        f.write(b'{"t": 2.0, "step": 31, "kind": "tr')
+    metrics2, offset2, counts2 = idx.load()
+    assert counts2["train"] == 31 and offset2 == path.stat().st_size - len(b'{"t": 2.0, "step": 31, "kind": "tr')
+    assert metrics2[-1]["step"] == 30 and len(metrics2) == len(metrics) + 1
+    assert idx.load()[1] == offset2  # nothing new -> no change
+
+    # the file shrinks (run rewritten from scratch): the index rebuilds itself
+    path.write_bytes(json.dumps({"t": 3.0, "step": 0, "kind": "status", "message": "reborn"}).encode() + b"\n")
+    metrics3, offset3, counts3 = idx.load()
+    assert counts3 == {"status": 1} and offset3 == path.stat().st_size and metrics3[0]["message"] == "reborn"
+
+
+def test_run_index_caps_train_by_bucket_means(tmp_path: Path) -> None:
+    root = tmp_path / "runs"
+    _fill_dense(root, "r", n_train=1000, status_every=100)
+    with TestClient(create_app(runs_dir=root, init_max_train=100)) as client:
+        m = client.get("/api/run/r").json()["metrics"]
+    train = [r for r in m if r["kind"] == "train"]
+    assert len(train) == 100
+    assert train[0]["step"] == 9 and train[0]["loss"] == pytest.approx(sum(8.0 - 7.0 * i / 999 for i in range(10)) / 10)
+    assert train[-1]["step"] == 999 and train[-1]["loss"] == pytest.approx(1.0)  # true last record, not a mean
+    assert train[0]["stage"] == "imitation" and train[0]["lr"] == pytest.approx(1e-3)
+    assert [r["step"] for r in m if r["kind"] != "train"] == sorted(r["step"] for r in m if r["kind"] != "train")
+    steps = [r["step"] for r in m]
+    assert steps == sorted(steps)  # buckets are merged into file order with the other kinds
 
 
 def test_positions_from_graph(tmp_path: Path) -> None:
@@ -223,12 +289,45 @@ def test_websocket_init_and_tail(runs_dir: Path) -> None:
         assert init["kind"] == "init"
         assert init["run"]["config"]["batch_size"] == 8
         assert len(init["metrics"]) > 10 and init["metrics"][-1]["kind"] == "activity"
+        size0 = (runs_dir / "alpha" / "metrics.jsonl").stat().st_size
+        assert init["offset"] == size0
 
         log = MetricsLogger(runs_dir / "alpha")
         log.log_status(999, message="tailed", stage="selfplay", total_steps=2000, eta_s=3.0)
         log.close()
         msg = ws.receive_json()  # pushed within ~POLL_INTERVAL
         assert msg["kind"] == "status" and msg["step"] == 999 and msg["message"] == "tailed"
+        cursor = ws.receive_json()  # followed by the byte cursor the client resumes from
+        assert cursor == {"kind": "cursor", "offset": (runs_dir / "alpha" / "metrics.jsonl").stat().st_size}
+        assert cursor["offset"] > size0
+
+
+def test_websocket_resume_keeps_history_and_falls_back_on_stale_cursor(runs_dir: Path) -> None:
+    app = create_app(runs_dir=runs_dir)
+    path = runs_dir / "alpha" / "metrics.jsonl"
+    with TestClient(app) as client:
+        with client.websocket_connect("/ws/alpha") as ws:
+            offset = ws.receive_json()["offset"]
+        # write while "disconnected", then reconnect with the cursor: no init, only what was missed
+        log = MetricsLogger(runs_dir / "alpha")
+        log.log_status(1000, message="missed", stage="selfplay", total_steps=2000, eta_s=2.0)
+        log.close()
+        with client.websocket_connect(f"/ws/alpha?after={offset}") as ws:
+            assert ws.receive_json() == {"kind": "resume", "offset": offset}
+            missed = ws.receive_json()
+            assert missed["kind"] == "status" and missed["message"] == "missed"
+            assert ws.receive_json() == {"kind": "cursor", "offset": path.stat().st_size}
+        # a cursor beyond the file (stale / different file) -> full init
+        with client.websocket_connect(f"/ws/alpha?after={path.stat().st_size + 10}") as ws:
+            init = ws.receive_json()
+            assert init["kind"] == "init" and init["metrics"][-1]["message"] == "missed"
+        # the file shrinks while a client is connected -> a fresh init instead of records from byte 0
+        with client.websocket_connect(f"/ws/alpha?after={path.stat().st_size}") as ws:
+            assert ws.receive_json()["kind"] == "resume"
+            path.write_bytes(json.dumps({"t": 1.0, "step": 0, "kind": "status", "message": "reborn"}).encode() + b"\n")
+            init = ws.receive_json()
+            assert init["kind"] == "init" and [m["message"] for m in init["metrics"]] == ["reborn"]
+            assert init["offset"] == path.stat().st_size
 
 
 def test_websocket_waits_for_run_to_appear(tmp_path: Path) -> None:

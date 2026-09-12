@@ -16,7 +16,7 @@ brain:
 
 # ---- data ----
 shards_dir: data/shards        # relative path: the cwd if it exists there, else FLYCHESS_HOME
-shard_name: lichess2014        # only lichess2014-*.npz shards
+shard_name: null               # any shard in shards_dir (`fly build-shards --name X` + `shard_name: X` to filter)
 val_fraction: 0.02
 
 # ---- imitation (stage 1) ----
@@ -38,7 +38,7 @@ eval_batches: 50
 checkpoint_every: 2000
 elo_every: 5000                # quick Elo vs random / material every N steps (0 = off)
 elo_games: 20
-num_workers: 6
+num_workers: 2                 # DataLoader workers: one has ~85x headroom at full-brain speed, each costs ~0.9 GB RAM
 seed: 0
 device: cuda
 

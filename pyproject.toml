@@ -7,7 +7,7 @@ requires-python = ">=3.12"
 license = { text = "MIT" }
 authors = [{ name = "Carlo Esposito", email = "carlo@aploi.de" }]
 dependencies = [
-  "torch>=2.6",
+  "torch>=2.7",  # CUDA 12.8+ wheels: needed for Blackwell (sm_120) GPUs
   "numpy>=2.0",
   "pandas>=2.2",
   "pyarrow>=17",
@@ -22,11 +22,12 @@ dependencies = [
   "rich>=13",
 ]
 
-[project.optional-dependencies]
-dev = ["pytest>=8", "pytest-timeout>=2.3", "ruff>=0.6", "httpx>=0.27"]
-
 [project.scripts]
 fly = "flychess.cli:main"
+
+# PEP 735 dependency group: `uv sync` installs it by default; with pip use `pip install --group dev` (pip >= 25.1).
+[dependency-groups]
+dev = ["pytest>=8", "pytest-timeout>=2.3", "ruff>=0.6", "httpx>=0.27"]
 
 [build-system]
 requires = ["hatchling"]

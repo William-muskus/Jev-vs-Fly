@@ -67,7 +67,7 @@ class TrainConfig:
     checkpoint_every: int = 2000
     elo_every: int = 5000                      # 0 disables the quick Elo during imitation
     elo_games: int = 20
-    num_workers: int = 6
+    num_workers: int = 2                       # the loader has ~85x headroom per worker; each worker ~0.9 GB RSS
     seed: int = 0
     device: str = field(default_factory=_default_device)
 

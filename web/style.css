@@ -9,7 +9,7 @@
   --line-2: #3d4630;
   --text: #ece5cf;
   --muted: #949a80;
-  --dim: #6b7160;
+  --dim: #8a917a; /* >= 4.5:1 on --bg, --surface, --surface-2 and the brainviz ground (WCAG AA for 12-13px text) */
   --amber: #e9a63a;
   --amber-2: #ffcb6b;
   --amber-dim: #7a5416;
@@ -30,6 +30,8 @@
   --hl-sel: rgba(255, 203, 107, .55);
   --hl-check: rgba(213, 56, 42, .75);
   --dot: rgba(14, 16, 11, .32);
+  --coord-on-light: #3f4a2a;
+  --coord-on-dark: #fff8e1;
 
   --display: "Iowan Old Style", "Palatino Linotype", Palatino, "Book Antiqua", Charter, "Times New Roman", Georgia, serif;
   --sans: system-ui, -apple-system, "Segoe UI", Roboto, Inter, "Helvetica Neue", Arial, sans-serif;
@@ -207,16 +209,24 @@ h2 { font: 400 clamp(22px, 2.4vw, 30px)/1.15 var(--display); margin: 0 0 12px; l
 .who .turn { color: var(--green); }
 .status { font-family: var(--display); font-style: italic; font-size: 17px; color: var(--amber-2); text-align: right; }
 .status.over { color: var(--green-2); }
+.status.error { color: var(--red-2); }
+.status-wrap { display: flex; align-items: center; justify-content: flex-end; gap: 10px; min-width: 0; }
+.btn-small { padding: 4px 10px; font-size: 12px; }
 
 @media (max-width: 980px) {
-  .game { grid-template-columns: 1fr; }
-  .fly-panel { flex-direction: row; flex-wrap: wrap; align-items: center; }
-  .fly-panel .avatar-wrap { width: 92px; }
-  .fly-panel .commentary { flex: 1; min-width: 200px; font-size: 16px; }
-  .fly-panel .valuebar { width: 100%; }
-  .brainviz { width: 100%; }
+  /* Single column. The fly panel dissolves into the grid (display: contents) so its pieces can be
+     ordered around the board: a compact avatar + commentary strip sits directly above the board
+     (where the fly's per-move mood is visible while you play), the brain canvas and legend move
+     below it, and the move list / actions come last. Keeps the board above the fold on phones. */
+  .game { grid-template-columns: 92px minmax(0, 1fr); gap: 12px; }
+  .fly-panel { display: contents; }
+  .fly-panel .avatar-wrap { order: 0; width: 92px; grid-column: 1; align-self: center; }
+  .fly-panel .commentary { order: 1; grid-column: 2; font-size: 16px; min-height: 2.6em; align-self: center; }
+  .fly-panel .valuebar { order: 2; grid-column: 1 / -1; }
+  .board-col { order: 3; grid-column: 1 / -1; }
+  .brainviz { order: 4; grid-column: 1 / -1; width: 100%; }
+  .side-panel { order: 5; grid-column: 1 / -1; }
   .board-frame, .board-head, .board-foot { width: min(100%, calc(100vh - 180px)); }
-  .side-panel { order: 3; }
 }
 
 /* ---------- fly panel ---------- */
@@ -320,9 +330,12 @@ h2 { font: 400 clamp(22px, 2.4vw, 30px)/1.15 var(--display); margin: 0 0 12px; l
 .cb-last { fill: var(--hl-last); }
 .cb-selected { fill: var(--hl-sel); }
 .cb-check { fill: var(--hl-check); }
+.cb-cursor { fill: none; stroke: var(--amber); stroke-width: 7; pointer-events: none; }
+.cb:focus { outline: none; }
+.cb:focus-visible { outline: 2px solid var(--amber); outline-offset: 3px; border-radius: 4px; }
 .cb-coord { font: 600 15px var(--mono); pointer-events: none; }
-.cb-coord.on-light { fill: var(--sq-dark); }
-.cb-coord.on-dark { fill: var(--sq-light); }
+.cb-coord.on-light { fill: var(--coord-on-light); }
+.cb-coord.on-dark { fill: var(--coord-on-dark); }
 .cb-piece { transition: transform .18s cubic-bezier(.2, .8, .2, 1), opacity .16s; cursor: grab; stroke-width: 3; stroke-linejoin: round; }
 .cb-piece.cb-w { fill: var(--piece-w); stroke: var(--piece-w-ink); }
 .cb-piece.cb-w .ink { fill: var(--piece-w-ink); stroke: var(--piece-w-ink); }
@@ -338,6 +351,8 @@ h2 { font: 400 clamp(22px, 2.4vw, 30px)/1.15 var(--display); margin: 0 0 12px; l
 .cb-promo-veil { fill: rgba(14, 16, 11, .55); }
 .cb-promo-choice rect { fill: var(--surface); stroke: var(--amber); stroke-width: 2; cursor: pointer; }
 .cb-promo-choice:hover rect { fill: var(--surface-2); }
+.cb-promo-choice:focus { outline: none; }
+.cb-promo-choice:focus-visible rect { fill: var(--surface-2); stroke-width: 5; }
 @keyframes appear { from { opacity: 0; transform: scale(.6); } }
 
 /* ---------- modals ---------- */
@@ -366,7 +381,7 @@ h2 { font: 400 clamp(22px, 2.4vw, 30px)/1.15 var(--display); margin: 0 0 12px; l
 @keyframes toast-in { from { transform: translate(-50%, 10px); opacity: 0; } }
 
 @media (max-width: 980px) {
-  .brainviz canvas { height: 160px; }
+  .brainviz canvas { height: 160px; } /* after the base 260px rule so it wins the cascade */
 }
 
 @media (prefers-reduced-motion: reduce) {

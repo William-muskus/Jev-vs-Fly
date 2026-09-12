@@ -136,8 +136,10 @@ def build_model(cfg: TrainConfig, graph: BrainGraph | None = None,
     return model, graph, gp
 
 
+# num_workers / seed: the imitation stage replays the loader past the already-trained batches of the epoch on
+# resume, and the batch sequence is only identical for the same worker count and seed
 RESUME_DRIFT_FIELDS = ("graph", "brain", "shards_dir", "shard_name", "batch_size", "lr", "weight_decay",
-                       "warmup_steps", "epochs", "max_steps", "val_fraction")
+                       "warmup_steps", "epochs", "max_steps", "val_fraction", "num_workers", "seed")
 
 
 def _warn_config_drift(ckpt_cfg: TrainConfig, cfg: TrainConfig) -> list[str]:

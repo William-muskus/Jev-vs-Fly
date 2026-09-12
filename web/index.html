@@ -122,7 +122,10 @@
     <div class="board-frame"><div id="board"></div></div>
     <div class="board-foot">
       <div class="who mono" id="who-bottom"></div>
-      <div class="status" id="status" aria-live="polite">Your move.</div>
+      <div class="status-wrap">
+        <div class="status" id="status" aria-live="polite">Your move.</div>
+        <button class="btn btn-small" id="btn-retry" type="button" hidden>Retry</button>
+      </div>
     </div>
   </section>
 
@@ -133,7 +136,7 @@
       <div class="clock mono">
         <div><span class="dim">last think</span> <b id="clk-last">—</b></div>
         <div><span class="dim">total</span> <b id="clk-total">0.0 s</b></div>
-        <div><span class="dim">sims</span> <b id="clk-sims">—</b></div>
+        <div><span class="dim">search</span> <b id="clk-sims">—</b></div>
       </div>
     </div>
     <ol class="moves mono" id="moves" aria-label="move list"></ol>

@@ -5,7 +5,7 @@ fastapi, rich) happen inside the command so that ``fly --help`` is instant::
 
     fly download [--connectome] [--games] [--months 2014-01,...]
     fly build-brain [--region full|central] [--max-neurons N] [--out data/brain/<name>.npz] [--tiny]
-    fly build-shards [--months ...] [--pgn FILE ...] [--min-elo 1800] [--workers 16] [--max-games N]
+    fly build-shards [--months ...] [--pgn FILE ...] [--min-elo 1800] [--workers 16] [--max-games N] [--val-every 50]
     fly train --run NAME [--stage imitation|selfplay|all] [--config cfg.yaml] [--resume] [--steps N] [--tiny]
     fly dashboard [--run NAME] [--port 8765]
     fly play [--run NAME | --ckpt PATH] [--difficulty larva|fly|superfly] [--color white|black] [--gui]
@@ -27,6 +27,7 @@ STAGES = ("imitation", "selfplay", "all")
 DIFFICULTIES = ("larva", "fly", "superfly")
 TINY_NEURONS = 2000
 TINY_IO = 128
+DEFAULT_VAL_EVERY = 50   # fly build-shards: 1 game in 50 (~2 %) -> <name>.val-NNNNN.npz
 DASHBOARD_PORT = 8765
 WEB_PORT = 8000
 
@@ -135,7 +136,8 @@ def cmd_build_shards(args: argparse.Namespace) -> int:
     print(f"[fly] building shards '{args.name}' from {len(pgns)} file(s) -> {out}")
     stats = build_shards(pgns, out, name=args.name, min_elo=args.min_elo, workers=args.workers,
                          max_games=args.max_games, max_positions=args.max_positions,
-                         skip_openings=args.skip_openings, shard_size=args.shard_size, seed=args.seed)
+                         skip_openings=args.skip_openings, shard_size=args.shard_size, seed=args.seed,
+                         val_every=args.val_every)
     print("[fly] " + stats.summary())
     return 0
 
@@ -320,6 +322,10 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--name", default="lichess", help="shard prefix: <out>/<name>-NNNNN.npz")
     s.add_argument("--out", default=None, help=f"output directory (default {paths.SHARDS_DIR})")
     s.add_argument("--seed", type=int, default=0)
+    s.add_argument("--val-every", dest="val_every", type=int, default=DEFAULT_VAL_EVERY,
+                   help="hold out one game in N *whole* as the validation set <out>/<name>.val-NNNNN.npz "
+                        "(game-disjoint from training; 0 = off, training then splits off whole shards, "
+                        "which is not game-disjoint)")
 
     # train
     s = sub.add_parser("train", help="train a run: imitation (stage 1) and/or self-play (stage 2)",

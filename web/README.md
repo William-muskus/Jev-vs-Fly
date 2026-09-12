@@ -28,7 +28,10 @@ scripts/serve-web.sh                 # http://localhost:8000  (python -m http.se
 
 A model must be served from `model/` next to `index.html`. Without it the landing page explains
 what to do. The first visit downloads the `.gz` blob (streamed, gunzipped in the worker) and caches
-the decoded buffer in the Cache API, keyed by `run_name` + `exported_at`; later visits load from cache.
+the decoded buffer in the Cache API, keyed by `run_name` + `exported_at` + `blob_sha256`; later visits load from cache.
+Blob requests carry the same version tag as a query string (`brain.flyb.gz?v=…`) and are fetched with
+`cache: 'no-cache'`, and every blob (downloaded or cached) is checked against the header's `total_bytes` and
+`blob_sha256`, so a re-deploy never pairs the new `brain.json` with a stale `brain.flyb` from an HTTP cache.
 
 ## Worker protocol
 
@@ -75,6 +78,10 @@ takes ≈7–8 s per move; the UI shows the simulation count ticking.
 
 `scripts/deploy-pages.sh` copies `web/` (with `web/model/`) into a temporary worktree on the
 `gh-pages` branch, commits and pushes. Every file must stay below GitHub's 100 MB limit.
+Each deploy is a single snapshot commit that replaces the branch (force push) so the ~75 MB of
+model blobs are not accumulated in history; `KEEP_HISTORY=1` appends instead. Re-running with an
+unchanged `web/` is a no-op (`BUILD.txt` is keyed on the source commit and `brain.json`'s
+`exported_at`, not on the wall clock).
 
 ## Credits
 

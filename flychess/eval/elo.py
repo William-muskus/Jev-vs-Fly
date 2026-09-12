@@ -3,6 +3,12 @@
 ``play_match`` plays every game of a match in lockstep so that a :class:`BrainPolicyPlayer` can
 evaluate all boards where it is to move in a single batched forward pass; players without
 ``choose_many`` are simply called board by board.  Games truncated at ``max_plies`` count as draws.
+
+Game termination follows the project-wide rule in :func:`flychess.train.mcts.terminal_value` (the one
+used by self-play, ``fly play`` and the web engine): checkmate, stalemate, insufficient material,
+50-move rule and threefold repetition of the *current* position. ``Board.is_game_over(claim_draw=True)``
+is deliberately not used — python-chess evaluates claimable draws *before* the side to move plays, so
+a player with a mate in one would be awarded a draw instead of delivering it.
 """
 from __future__ import annotations
 
@@ -16,6 +22,7 @@ import chess
 import chess.pgn
 
 from flychess.eval.opponents import BrainPolicyPlayer, Player, make_opponent
+from flychess.train.mcts import result_string, terminal_value
 
 RESULT_SCORE = {"1-0": 1.0, "0-1": 0.0, "1/2-1/2": 0.5}
 
@@ -85,9 +92,9 @@ def board_pgn(board: chess.Board, white: str, black: str, result: str, headers: 
 
 
 def _game_result(board: chess.Board, max_plies: int) -> str | None:
-    """Final result string, or None while the game is still running."""
-    if board.is_game_over(claim_draw=True):
-        return board.result(claim_draw=True)
+    """Final result string, or None while the game is still running (see module doc for the rule)."""
+    if terminal_value(board) is not None:
+        return result_string(board)
     if len(board.move_stack) >= max_plies:
         return "1/2-1/2"
     return None
@@ -144,7 +151,7 @@ def play_match(
             result.losses += 1
         else:
             result.draws += 1
-        if len(boards[i].move_stack) >= max_plies and not boards[i].is_game_over(claim_draw=True):
+        if len(boards[i].move_stack) >= max_plies and terminal_value(boards[i]) is None:
             result.truncated += 1
         result.results[i] = res
         result.plies[i] = len(boards[i].move_stack)

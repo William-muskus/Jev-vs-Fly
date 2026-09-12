@@ -44,13 +44,8 @@
     while (lo < hi) { const mid = (lo + hi) >> 1; if (arr[mid] < x) lo = mid + 1; else hi = mid; }
     return lo;
   }
-  function niceStep(range, targetTicks) {
-    const raw = range / Math.max(1, targetTicks);
-    const mag = Math.pow(10, Math.floor(Math.log10(raw)));
-    const norm = raw / mag;
-    const nice = norm < 1.5 ? 1 : norm < 3.5 ? 2 : norm < 7.5 ? 5 : 10;
-    return nice * mag;
-  }
+  // axis math (nice steps, degenerate-range expansion, bounded tick generation, downsampling) — see chartmath.js
+  const { niceStep, expandRange, ticks, fmtTick, downsample } = window.FlyChartMath;
 
   // ------------------------------------------------------------------ Chart
   const MAX_POINTS = 2000; // bucketed downsampling target
@@ -95,7 +90,14 @@
       this.renderLegend();
       return s;
     }
-    clear() { for (const s of this.series.values()) { s.xs = []; s.ys = []; s.ds = null; } this.requestRender(); }
+    clear() {
+      const fixed = new Set((this.opts.series || []).map((s) => s.key));
+      for (const [key, s] of this.series) {
+        if (fixed.has(key)) { s.xs = []; s.ys = []; s.ds = null; } else this.series.delete(key); // dynamic (e.g. Elo opponents)
+      }
+      this.renderLegend();
+      this.requestRender();
+    }
     append(key, x, y, spec) {
       if (typeof y !== "number" || !Number.isFinite(y) || typeof x !== "number") return;
       const s = this.series.get(key) || this.addSeries(key, spec || {});
@@ -106,16 +108,8 @@
     /** Bucketed downsampling: equal-count buckets, mean x / mean y (cached until the series changes). */
     downsampled(s) {
       if (s.ds && s.ds.n === s.xs.length) return s.ds;
-      const n = s.xs.length;
-      if (n <= MAX_POINTS) { s.ds = { n, xs: s.xs, ys: s.ys }; return s.ds; }
-      const per = Math.ceil(n / MAX_POINTS);
-      const xs = [], ys = [];
-      for (let i = 0; i < n; i += per) {
-        let sx = 0, sy = 0, c = 0;
-        for (let j = i; j < Math.min(n, i + per); j++) { sx += s.xs[j]; sy += s.ys[j]; c++; }
-        xs.push(sx / c); ys.push(sy / c);
-      }
-      s.ds = { n, xs, ys };
+      const { xs, ys } = downsample(s.xs, s.ys, MAX_POINTS);
+      s.ds = { n: s.xs.length, xs, ys };
       return s.ds;
     }
 
@@ -169,8 +163,15 @@
       }
       this.emptyEl.hidden = any;
       if (!any) return;
-      if (xmax === xmin) { xmin -= 1; xmax += 1; }
-      if (ymax === ymin) { ymin -= Math.abs(ymin) * 0.1 || 0.5; ymax += Math.abs(ymax) * 0.1 || 0.5; }
+      // Degenerate ranges: a constant series (or one that is constant up to float noise after bucket averaging)
+      // must still yield a step that advances the tick loops below.
+      if (xmax - xmin <= Math.max(Math.abs(xmin), Math.abs(xmax), 1) * 1e-9) {
+        const ext = this.opts.xExtent ? this.opts.xExtent() : null; // e.g. the run's full step range
+        if (ext && Number.isFinite(ext[0]) && Number.isFinite(ext[1]) && ext[0] <= xmin && ext[1] > ext[0]) {
+          xmin = ext[0]; xmax = Math.max(ext[1], xmax);
+        } else { const e = Math.max(1, Math.abs(xmin) * 0.05); xmin -= e; xmax += e; }
+      }
+      [ymin, ymax] = expandRange(ymin, ymax);
       const ypad = (ymax - ymin) * 0.08; ymin -= ypad; ymax += ypad;
       if (!this.log && this.opts.zeroBased && ymin > 0) ymin = 0;
 
@@ -185,18 +186,19 @@
       ctx.strokeStyle = css("--line");
       ctx.lineWidth = 1;
       const ystep = niceStep(ymax - ymin, 4);
-      for (let v = Math.ceil(ymin / ystep) * ystep; v <= ymax; v += ystep) {
+      for (const v of ticks(ymin, ymax, ystep)) {
         const y = Math.round(Y(v)) + 0.5;
         ctx.beginPath(); ctx.moveTo(pad.l, y); ctx.lineTo(W - pad.r, y); ctx.stroke();
-        const label = this.log ? fmtNum(Math.pow(10, v), 1) : fmtNum(v, 2);
+        const label = this.log ? fmtNum(Math.pow(10, v), 1) : fmtTick(v, ystep);
         ctx.textAlign = "right"; ctx.textBaseline = "middle"; ctx.fillText(label, pad.l - 5, y);
       }
       const xstep = Math.max(1, niceStep(xmax - xmin, Math.max(2, Math.floor(pw / 90))));
       ctx.textAlign = "center"; ctx.textBaseline = "top";
-      for (let v = Math.ceil(xmin / xstep) * xstep; v <= xmax; v += xstep) {
+      for (const v of ticks(xmin, xmax, xstep)) {
         const x = Math.round(X(v)) + 0.5;
         ctx.beginPath(); ctx.moveTo(x, pad.t); ctx.lineTo(x, pad.t + ph); ctx.stroke();
-        ctx.fillText(fmtInt(v), x, pad.t + ph + 4);
+        const label = fmtInt(v), half = ctx.measureText(label).width / 2;
+        ctx.fillText(label, Math.min(Math.max(x, pad.l + half), W - pad.r - half), pad.t + ph + 4); // keep inside the canvas
       }
 
       // series
@@ -524,7 +526,7 @@
     for (let k = 0; k < n; k++) {
       let x, y;
       const p = usePos ? activity.posByIdx.get(idx[k]) : null;
-      if (p) { x = pad + p[0] * (W - 2 * pad); y = pad + (1 - p[1]) * (H - 2 * pad); }
+      if (p) { x = pad + p[0] * (W - 2 * pad); y = pad + p[1] * (H - 2 * pad); } // FlyWire y grows ventrally: no flip
       else { x = pad + ((k % cols) + 0.5) / cols * (W - 2 * pad); y = pad + (Math.floor(k / cols) + 0.5) / rows * (H - 2 * pad); }
       pts[k] = [x, y];
     }
@@ -552,9 +554,11 @@
 
   async function fetchPositions(run) {
     activity.lastFetch = Date.now();
+    const gen = state.gen;
     try {
       const r = await fetch(`/api/run/${encodeURIComponent(run)}/positions`);
       const j = await r.json();
+      if (gen !== state.gen || run !== state.run) return; // the run changed while the request was in flight
       if (!j.available) { activity.posByIdx = null; drawActivity(); return; }
       const map = new Map();
       j.neuron_idx.forEach((i, k) => { const p = j.positions[k]; if (p) map.set(i, p); });
@@ -596,13 +600,15 @@
       { key: "val_top1", label: "eval top-1", color: SERIES[0], dash: true }, { key: "val_top3", label: "eval top-3", color: SERIES[1], dash: true }] }),
     lr: new Chart(chartEls.lr, { title: "learning rate", series: [{ key: "lr", label: "lr", color: SERIES[3] }] }),
     throughput: new Chart(chartEls.throughput, { title: "throughput", zeroBased: true, series: [{ key: "pos_per_sec", label: "positions / s", color: SERIES[2] }] }),
-    elo: new Chart(chartEls.elo, { title: "Elo estimate", series: [] }),
+    elo: new Chart(chartEls.elo, { title: "Elo estimate", series: [], xExtent: () => [0, totalSteps()] }),
     value: new Chart(chartEls.value, { title: "value head", series: [
       { key: "value_loss", label: "train mse", color: SERIES[2] }, { key: "val_value_mse", label: "eval mse", color: SERIES[2], dash: true }] }),
   };
 
   // ------------------------------------------------------------------ store
-  const state = { run: null, runInfo: null, lastTrain: null, lastStatus: null, gen: 0, ws: null, retry: 1000, lastGame: null, lastActivity: null };
+  // `offset` is the metrics.jsonl byte cursor after the last record received (from the server's init / cursor
+  // frames); a reconnect to the same run resumes from it instead of re-fetching (and resetting) everything.
+  const state = { run: null, runInfo: null, lastTrain: null, lastStatus: null, gen: 0, ws: null, retry: 1000, lastGame: null, lastActivity: null, offset: null };
   const st = {
     stage: $("#st-stage"), step: $("#st-step"), eta: $("#st-eta"), gpu: $("#st-gpu"), pps: $("#st-pps"), epoch: $("#st-epoch"),
     conn: $("#st-conn"), connText: $("#st-conn-text"), bar: $("#progress-bar"), runInfo: $("#run-info"),
@@ -613,7 +619,7 @@
   function resetAll() {
     for (const c of Object.values(charts)) c.clear();
     logEl.innerHTML = "";
-    state.lastTrain = null; state.lastStatus = null; state.lastGame = null; state.lastActivity = null;
+    state.lastTrain = null; state.lastStatus = null; state.lastGame = null; state.lastActivity = null; state.offset = null;
     activity.rec = null; activity.posByIdx = null; drawActivity();
     game.key = null; game.parsed = null; setPlaying(false); renderBoard(startState(), null);
     gameSlider.max = 0; gamePly.textContent = "0 / 0"; pgnEl.textContent = "no game yet — the fly has not played a sample game"; gameMeta.textContent = "";
@@ -664,11 +670,17 @@
     updateStatus();
   }
 
+  /** Total steps of the current run (latest status record, else run.json config), or null. */
+  function totalSteps() {
+    const s = state.lastStatus, info = state.runInfo || {};
+    return s && s.total_steps ? s.total_steps : (info.config && (info.config.steps || info.config.total_steps)) || null;
+  }
+
   function updateStatus() {
     const t = state.lastTrain, s = state.lastStatus, info = state.runInfo || {};
     const stage = (s && s.stage) || (t && t.stage) || (info.config && info.config.stage) || "–";
     const step = t ? t.step : s ? s.step : null;
-    const total = s && s.total_steps ? s.total_steps : (info.config && (info.config.steps || info.config.total_steps)) || null;
+    const total = totalSteps();
     st.stage.textContent = stage;
     st.step.textContent = step === null ? "–" : `${fmtInt(step)}${total ? ` / ${fmtInt(total)}` : ""}`;
     st.eta.textContent = s && s.eta_s != null ? fmtDuration(s.eta_s) : "–";
@@ -687,34 +699,51 @@
   }
 
   // ------------------------------------------------------------------ websocket
-  function connect(run) {
+  /**
+   * Open the websocket for `run`. `after` (a byte cursor from a previous connection to the *same* run) asks the
+   * server to resume the tail from there: the server answers `{"kind":"resume"}` and the accumulated history is
+   * kept; without it (or if the cursor is stale) the server sends a full `init` and the UI is rebuilt from it.
+   * Frames: init · resume · cursor (`{"offset"}` after each batch of live records) · raw metrics records.
+   */
+  function connect(run, after) {
     const gen = ++state.gen;
     if (state.ws) { try { state.ws.close(); } catch (e) { /* ignore */ } state.ws = null; }
     if (!run) { setConn("idle", "idle"); return; }
     setConn("connecting", "connecting");
     const proto = location.protocol === "https:" ? "wss" : "ws";
-    const ws = new WebSocket(`${proto}://${location.host}/ws/${encodeURIComponent(run)}`);
+    const query = after !== null && after !== undefined ? `?after=${encodeURIComponent(after)}` : "";
+    const ws = new WebSocket(`${proto}://${location.host}/ws/${encodeURIComponent(run)}${query}`);
     state.ws = ws;
     ws.onopen = () => { if (gen !== state.gen) return; state.retry = 1000; setConn("waiting", "waiting for metrics"); };
     ws.onmessage = (ev) => {
       if (gen !== state.gen) return;
       let rec; try { rec = JSON.parse(ev.data); } catch (e) { return; }
-      if (rec.kind === "init") {
-        resetAll();
-        state.runInfo = rec.run || {};
-        for (const m of rec.metrics || []) ingest(m, false);
-        applyLatest();
-        setConn("live", `live · ${(rec.metrics || []).length} records`);
-        fetchPositions(run);
-      } else {
-        ingest(rec, true);
-        setConn("live", `live · ${fmtTime(rec.t)}`);
+      switch (rec.kind) {
+        case "init":
+          resetAll();
+          state.runInfo = rec.run || {};
+          for (const m of rec.metrics || []) ingest(m, false);
+          if (typeof rec.offset === "number") state.offset = rec.offset;
+          applyLatest();
+          setConn("live", `live · ${fmtInt(Object.values(rec.counts || {}).reduce((a, b) => a + b, 0) || (rec.metrics || []).length)} records`);
+          fetchPositions(run);
+          break;
+        case "resume":
+          if (typeof rec.offset === "number") state.offset = rec.offset;
+          setConn("live", "live · resumed");
+          break;
+        case "cursor":
+          if (typeof rec.offset === "number") state.offset = rec.offset;
+          break;
+        default:
+          ingest(rec, true);
+          setConn("live", `live · ${fmtTime(rec.t)}`);
       }
     };
     ws.onclose = () => {
       if (gen !== state.gen) return;
       setConn("offline", `reconnecting in ${Math.round(state.retry / 1000)}s`);
-      setTimeout(() => { if (gen === state.gen) connect(run); }, state.retry);
+      setTimeout(() => { if (gen === state.gen) connect(run, run === state.run ? state.offset : null); }, state.retry);
       state.retry = Math.min(10000, state.retry * 2);
     };
     ws.onerror = () => { /* onclose follows */ };

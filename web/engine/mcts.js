@@ -2,8 +2,8 @@
 //
 // Mirrors flychess/train/mcts.py: priors = legal-masked softmax of the policy head, leaf value =
 // value head from the leaf mover's perspective, negated on every backup step, c_puct = 1.5,
-// optional Dirichlet noise at the root, terminal detection via chess.js (checkmate = -1 for the
-// mover, any draw = 0). One chess.js instance is reused: moves are played along the selected
+// optional Dirichlet noise at the root, terminal detection via chess.js plus the FEN-based
+// repetition count of encoding.js (checkmate = -1 for the mover, any draw = 0). One chess.js instance is reused: moves are played along the selected
 // path and undone on the way back.
 //
 // No chess knowledge lives here except the rules; every evaluation is the network's.
@@ -66,77 +66,138 @@ function normalSample(rnd) {
  */
 
 /**
- * Run MCTS from the current position of `chess`.
+ * @typedef {object} MctsResult
+ * @property {string|null} move
+ * @property {object|null} moveObj
+ * @property {Array<{uci:string, n:number, q:number, p:number}>} visits
+ * @property {number} rootValue
+ * @property {number} rootPrior
+ * @property {number} sims        simulations actually run (less than requested when stopped early)
+ */
+
+/**
+ * Create a resumable search from the current position of `chess`: `step()` runs one simulation
+ * (returns false once the budget is spent or the root is terminal), `result()` picks the move from
+ * the visits so far. `runMCTS` drives it synchronously; `runMCTSAsync` yields to the event loop
+ * between batches so a Web Worker can receive a cancel message mid-search.
  * @param {import('./flybrain.js').FlyBrain} brain
  * @param {object} chess  chess.js instance positioned at the root (its history is used for repetition planes)
- * @param {{encodeBoard:Function, legalMoveIndices:Function, moveToIndex:Function}} enc  encoding module
+ * @param {{encodeBoard:Function, legalMoveIndices:Function, moveToIndex:Function, repetitionCount?:Function}} enc  encoding module
  * @param {MctsOptions} [opts]
- * @returns {{move: string|null, moveObj: object|null, visits: Array<{uci:string, n:number, q:number, p:number}>, rootValue: number, sims: number}}
+ * @returns {{sims:number, done:number, step:()=>boolean, result:()=>MctsResult}}
  */
-export function runMCTS(brain, chess, enc, opts = {}) {
+export function createSearch(brain, chess, enc, opts = {}) {
   const sims = opts.sims ?? 200;
   const cPuct = opts.cPuct ?? 1.5;
   const rnd = opts.rnd ?? Math.random;
   const root = new Node(1);
   const rootValue = expand(root, brain, chess, enc);
   root.visits = 1; root.valueSum = -rootValue;   // root's stored value is from the parent's (opponent's) view; only Q of children matters
-  if (!root.children || root.children.length === 0) {
-    return { move: null, moveObj: null, visits: [], rootValue, sims: 0 };
-  }
-  if (opts.dirichletAlpha > 0 && root.children.length > 1) {
+  const hasChildren = !!(root.children && root.children.length);
+  if (hasChildren && opts.dirichletAlpha > 0 && root.children.length > 1) {
     const noise = dirichlet(root.children.length, opts.dirichletAlpha, rnd);
     const eps = opts.dirichletEps ?? 0.25;
     root.children.forEach((c, i) => { c.node.prior = (1 - eps) * c.node.prior + eps * noise[i]; });
   }
 
   const path = [];
-  for (let s = 0; s < sims; s++) {
-    let node = root;
-    path.length = 0;
-    let depth = 0;
-    // --- select ---
-    while (node.children && node.children.length && !node.terminal) {
-      const child = selectChild(node, cPuct);
-      chess.move(child.moveObj);
-      depth++;
-      node = child.node;
-      path.push(node);
-    }
-    // --- expand / evaluate ---
-    let value;
-    if (node.terminal) value = node.terminalValue;
-    else value = expand(node, brain, chess, enc);
-    // --- backup: value is from the leaf mover's perspective; the node was entered by the opponent ---
-    let v = -value;
-    for (let i = path.length - 1; i >= 0; i--) {
-      const p = path[i];
-      p.visits++; p.valueSum += v;
-      v = -v;
-    }
-    root.visits++;
-    for (let i = 0; i < depth; i++) chess.undo();
-    opts.onProgress?.(s + 1, sims);
-  }
+  const search = {
+    sims: hasChildren ? sims : 0,
+    done: 0,
+    step() {
+      if (!hasChildren || search.done >= sims) return false;
+      let node = root;
+      path.length = 0;
+      let depth = 0;
+      // --- select ---
+      while (node.children && node.children.length && !node.terminal) {
+        const child = selectChild(node, cPuct);
+        chess.move(child.moveObj);
+        depth++;
+        node = child.node;
+        path.push(node);
+      }
+      // --- expand / evaluate ---
+      let value;
+      if (node.terminal) value = node.terminalValue;
+      else value = expand(node, brain, chess, enc);
+      // --- backup: value is from the leaf mover's perspective; the node was entered by the opponent ---
+      let v = -value;
+      for (let i = path.length - 1; i >= 0; i--) {
+        const p = path[i];
+        p.visits++; p.valueSum += v;
+        v = -v;
+      }
+      root.visits++;
+      for (let i = 0; i < depth; i++) chess.undo();
+      search.done++;
+      opts.onProgress?.(search.done, sims);
+      return search.done < sims;
+    },
+    result() {
+      if (!hasChildren) return { move: null, moveObj: null, visits: [], rootValue, rootPrior: rootValue, sims: 0 };
+      const visits = root.children.map((c) => ({ uci: c.uci, n: c.node.visits, q: c.node.q, p: c.node.prior }));
+      visits.sort((a, b) => b.n - a.n || b.p - a.p);
+      let chosen;
+      const T = opts.temperature ?? 0;
+      if (T > 0) {
+        const ws = visits.map((v) => Math.pow(v.n, 1 / T));
+        const total = ws.reduce((a, b) => a + b, 0);
+        let r = rnd() * total;
+        chosen = visits[visits.length - 1];
+        for (let i = 0; i < ws.length; i++) { r -= ws[i]; if (r <= 0) { chosen = visits[i]; break; } }
+      } else {
+        chosen = visits[0];
+      }
+      const child = root.children.find((c) => c.uci === chosen.uci);
+      // root value estimate = visit-weighted Q of children (from the root mover's perspective)
+      let qSum = 0, nSum = 0;
+      for (const c of root.children) { qSum += c.node.valueSum; nSum += c.node.visits; }
+      const rootQ = nSum ? qSum / nSum : rootValue;
+      return { move: chosen.uci, moveObj: child.moveObj, visits, rootValue: rootQ, rootPrior: rootValue, sims: search.done };
+    },
+  };
+  return search;
+}
 
-  const visits = root.children.map((c) => ({ uci: c.uci, n: c.node.visits, q: c.node.q, p: c.node.prior }));
-  visits.sort((a, b) => b.n - a.n || b.p - a.p);
-  let chosen;
-  const T = opts.temperature ?? 0;
-  if (T > 0) {
-    const ws = visits.map((v) => Math.pow(v.n, 1 / T));
-    const total = ws.reduce((a, b) => a + b, 0);
-    let r = rnd() * total;
-    chosen = visits[visits.length - 1];
-    for (let i = 0; i < ws.length; i++) { r -= ws[i]; if (r <= 0) { chosen = visits[i]; break; } }
-  } else {
-    chosen = visits[0];
+/**
+ * Run MCTS to completion from the current position of `chess`.
+ * @param {import('./flybrain.js').FlyBrain} brain
+ * @param {object} chess
+ * @param {{encodeBoard:Function, legalMoveIndices:Function, moveToIndex:Function, repetitionCount?:Function}} enc
+ * @param {MctsOptions} [opts]
+ * @returns {MctsResult}
+ */
+export function runMCTS(brain, chess, enc, opts = {}) {
+  const search = createSearch(brain, chess, enc, opts);
+  while (search.step()) { /* simulate */ }
+  return search.result();
+}
+
+/**
+ * Same as `runMCTS`, but yields to the event loop every `opts.yieldEvery` (default 10) simulations
+ * and stops early when `opts.shouldStop()` returns true — the result then reflects the simulations
+ * run so far (`result.sims < opts.sims`). Nothing else may touch `chess` while the search is
+ * in flight (the board is left at the root between batches).
+ * @param {import('./flybrain.js').FlyBrain} brain
+ * @param {object} chess
+ * @param {{encodeBoard:Function, legalMoveIndices:Function, moveToIndex:Function, repetitionCount?:Function}} enc
+ * @param {MctsOptions & {yieldEvery?: number, shouldStop?: () => boolean}} [opts]
+ * @returns {Promise<MctsResult & {stopped: boolean}>}
+ */
+export async function runMCTSAsync(brain, chess, enc, opts = {}) {
+  const every = Math.max(1, opts.yieldEvery ?? 10);
+  const search = createSearch(brain, chess, enc, opts);
+  let stopped = false;
+  for (;;) {
+    let more = true;
+    for (let i = 0; i < every && more; i++) more = search.step();
+    if (!more) break;
+    if (opts.shouldStop?.()) { stopped = true; break; }
+    await new Promise((r) => setTimeout(r, 0));
+    if (opts.shouldStop?.()) { stopped = true; break; }
   }
-  const child = root.children.find((c) => c.uci === chosen.uci);
-  // root value estimate = visit-weighted Q of children (from the root mover's perspective)
-  let qSum = 0, nSum = 0;
-  for (const c of root.children) { qSum += c.node.valueSum; nSum += c.node.visits; }
-  const rootQ = nSum ? qSum / nSum : rootValue;
-  return { move: chosen.uci, moveObj: child.moveObj, visits, rootValue: rootQ, rootPrior: rootValue, sims };
+  return { ...search.result(), stopped };
 }
 
 function selectChild(node, cPuct) {
@@ -153,12 +214,15 @@ function selectChild(node, cPuct) {
 /** Evaluate `chess` with the brain, create the children; returns the value for the side to move. */
 function expand(node, brain, chess, enc) {
   if (chess.isCheckmate()) { node.terminal = 1; node.terminalValue = -1; node.children = []; return -1; }
-  if (chess.isDraw() || chess.isStalemate() || chess.isThreefoldRepetition()) {
+  // repetition via the FEN-based count (python-chess semantics); chess.js' hash counter misses
+  // repetitions whose first occurrence followed a double push with an illegal (pinned) ep capture
+  const reps = enc.repetitionCount ? enc.repetitionCount(chess) : 0;
+  if (chess.isDraw() || chess.isStalemate() || reps >= 3) {
     node.terminal = 1; node.terminalValue = 0; node.children = []; return 0;
   }
   const moves = chess.moves({ verbose: true });
   if (moves.length === 0) { node.terminal = 1; node.terminalValue = 0; node.children = []; return 0; }
-  const x = enc.encodeBoard(chess);
+  const x = enc.encodeBoard(chess, enc.repetitionCount ? { repeated: reps >= 2 } : {});
   const { policy, value } = brain.forward(x);
   const idx = moves.map((m) => enc.moveToIndex(m, chess));
   const probs = policyForLegal(policy, idx, 1);

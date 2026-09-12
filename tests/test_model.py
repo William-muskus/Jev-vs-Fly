@@ -282,6 +282,32 @@ def test_cpu_gpu_parity_and_autocast(graph, config):
     assert torch.allclose(p, pa.float().cpu(), atol=0.1, rtol=0.05)
 
 
+def test_bf16_config_keeps_recurrent_params_fp32_and_trainable(graph, config):
+    """Regression: with ``dtype='bfloat16'`` the synapse logits (~ -2.5..-4.5, bf16 ulp ~ 0.02) used to be
+    stored in bf16, so every Adam step (~ lr) rounded to zero and the connectome silently never learned."""
+    torch.manual_seed(4)
+    m = FlyBrain(graph, config.replace(dtype="bfloat16"))
+    assert m.syn_gain.dtype == torch.float32
+    assert m.bias.dtype == torch.float32 and m.leak_logit.dtype == torch.float32
+    assert m.w_in.dtype == torch.bfloat16 and m.policy_head.weight.dtype == torch.bfloat16  # dense parts follow config
+    gain0 = m.syn_gain.detach().clone()
+    opt = torch.optim.Adam(m.parameters(), lr=1e-3)
+    x = torch.randn(8, 1280)
+    tm, tv = torch.randint(0, 64, (8,)), torch.rand(8) * 2 - 1
+    for _ in range(5):
+        opt.zero_grad()
+        p, v = m(x)
+        loss, _ = policy_value_loss(p, v, tm, tv)
+        loss.backward()
+        opt.step()
+    moved = m.syn_gain.detach() != gain0
+    # only synapses on an input->output path within `steps` get a gradient on this toy graph, but every
+    # one of those must actually move (in bf16 storage none of them did)
+    assert moved[m.syn_gain.grad != 0].all()
+    assert 0.2 < moved.float().mean().item() < 0.6, f"{moved.float().mean().item():.0%} of syn_gain moved"
+    assert torch.isfinite(m(x)[0].float()).all()
+
+
 # ---- slow: full-brain benchmark (run with `-m slow`) ------------------------------------------------
 @pytest.mark.slow
 @cuda_only

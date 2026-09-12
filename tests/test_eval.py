@@ -123,6 +123,75 @@ def test_play_match_random_vs_material_two_games():
     assert m2.results == m.results and m2.plies == m.plies
 
 
+class _Mater(Player):
+    """Plays a checkmating move when one exists, else the first legal move."""
+
+    name = "mater"
+
+    def choose(self, board: chess.Board) -> chess.Move:
+        for move in board.legal_moves:
+            board.push(move)
+            mate = board.is_checkmate()
+            board.pop()
+            if mate:
+                return move
+        return next(iter(board.legal_moves))
+
+
+class _Scripted(_Mater):
+    """Replays a fixed UCI move list (used to force a repetition), then plays like :class:`_Mater`."""
+
+    name = "scripted"
+
+    def __init__(self, moves: list[str]) -> None:
+        self._moves = [chess.Move.from_uci(m) for m in moves]
+        self._i = 0
+
+    def choose(self, board: chess.Board) -> chess.Move:
+        if self._i >= len(self._moves):
+            return super().choose(board)
+        move = self._moves[self._i]
+        self._i += 1
+        return move
+
+
+def test_play_match_uses_shared_termination_rule_not_claim_draw():
+    """Regression: ``is_game_over(claim_draw=True)`` pre-empts the mover (halfmove clock 99 / a third
+    repetition *available* on the next move), awarding a draw to a side with a mate in one. Matches must
+    use the same rule as self-play / ``fly play`` / the web engine (``train.mcts.terminal_value``)."""
+    from flychess.train.mcts import terminal_value
+
+    # 50-move rule: halfmove clock 99, white has Ra8#; python-chess would call it a claimable draw.
+    fen = "6k1/8/6K1/8/8/8/8/R7 w - - 99 80"
+    b = chess.Board(fen)
+    assert b.is_game_over(claim_draw=True) and terminal_value(b) is None  # the two rules disagree here
+    m = play_match(_Mater(), RandomPlayer(seed=0), games=1, max_plies=10, start_fens=[fen])
+    assert (m.wins, m.draws, m.losses) == (1, 0, 0) and m.results == ["1-0"] and m.plies == [1]
+    assert m.truncated == 0 and "Ra8#" in m.pgns[0]
+
+    # Threefold repetition: after 7 scripted plies black *could* repeat a third time, but has Rb1#.
+    start = "r6k/8/8/8/4N3/8/6PP/7K w - - 0 1"
+    white = _Scripted(["e4c3", "c3e4", "e4c3", "c3e4"])
+    black = _Scripted(["a8b8", "b8a8", "a8b8"])
+    probe = chess.Board(start)
+    for uci in ("e4c3", "a8b8", "c3e4", "b8a8", "e4c3", "a8b8", "c3e4"):
+        probe.push_uci(uci)
+    assert probe.is_game_over(claim_draw=True) and terminal_value(probe) is None  # rules disagree again
+    m = play_match(white, black, games=1, max_plies=40, start_fens=[start])
+    assert (m.wins, m.draws, m.losses) == (0, 0, 1) and m.results == ["0-1"] and m.plies == [8]
+    assert "Rb1#" in m.pgns[0]
+
+    # A genuine (already occurred) threefold repetition still ends the game as a draw.
+    white = _Scripted(["e4c3", "c3e4", "e4c3", "c3e4"])
+    black = _Scripted(["a8b8", "b8a8", "a8b8", "b8a8"])
+    m = play_match(white, black, games=1, max_plies=40, start_fens=[start])
+    assert m.results == ["1/2-1/2"] and m.plies == [8] and m.truncated == 0
+
+    # A game stopped at max_plies is a draw and counted as truncated.
+    m = play_match(RandomPlayer(seed=1), RandomPlayer(seed=2), games=1, max_plies=4)
+    assert m.results == ["1/2-1/2"] and m.plies == [4] and m.truncated == 1
+
+
 def test_play_match_with_brain_uses_choose_many(toy_model):
     fly = BrainPolicyPlayer(toy_model, device=DEVICE)
     calls = []

@@ -46,16 +46,25 @@ function positionKey(fen) {
 }
 
 /**
- * True if the current position already occurred earlier in the game (same pieces, side to move,
- * castling rights and legal en-passant square -- python-chess `is_repetition(2)` semantics).
- * Computed from the `before` FENs of the move history.
+ * Number of times the current position has occurred in the game, current occurrence included
+ * (same pieces, side to move, castling rights and *legal* en-passant square -- python-chess
+ * `is_repetition(n)` semantics: `repetitionCount(chess) >= n`). Computed from the `before` FENs of
+ * the move history. Use this rather than chess.js' `isThreefoldRepetition()`: its Zobrist counter
+ * hashes the en-passant square even when the capture is illegal (pinned), so a position first
+ * reached by such a double push is never matched again and the draw goes undetected.
  */
-export function positionRepeated(chess) {
+export function repetitionCount(chess) {
   const key = positionKey(chess.fen());
+  let n = 1;
   for (const move of chess.history({ verbose: true })) {
-    if (positionKey(move.before) === key) return true;
+    if (positionKey(move.before) === key) n++;
   }
-  return false;
+  return n;
+}
+
+/** True if the current position already occurred earlier in the game (`is_repetition(2)`). */
+export function positionRepeated(chess) {
+  return repetitionCount(chess) >= 2;
 }
 
 /**

@@ -8,6 +8,7 @@ from .graph import (
     edge_signs,
     graph_path,
     load_or_build,
+    neuron_nt_type,
     toy_graph,
 )
 from .load import Connectome, load_connectome, parse_connectome
@@ -25,6 +26,7 @@ __all__ = [
     "graph_path",
     "load_connectome",
     "load_or_build",
+    "neuron_nt_type",
     "parse_connectome",
     "toy_graph",
 ]

@@ -9,7 +9,7 @@ import { dirname, join } from 'node:path';
 import { Chess } from '../vendor/chess.js';
 import {
   FLAT_INPUT, NUM_MOVES, encodeBoard, moveToIndex, indexToMove, legalMoveIndices, legalMoveMask,
-  uciToMove, positionRepeated,
+  uciToMove, positionRepeated, repetitionCount,
 } from '../engine/encoding.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -78,3 +78,35 @@ for (const [i, vec] of vectors.entries()) {
     assert.equal(seen.size, Object.keys(vec.moves).length);
   });
 }
+
+// Threefold repetition must follow python-chess `is_repetition(3)` (legal-ep-only position key),
+// not chess.js' Zobrist counter, which hashes the ep square even when the capture is pinned/illegal.
+test('repetitionCount counts repetitions chess.js misses after a pinned en-passant double push', () => {
+  const chess = new Chess('6n1/8/8/8/R3p2k/8/3P4/1N5K w - - 0 1');
+  const counts = [];
+  for (const u of 'd2d4 g8f6 b1c3 f6g8 c3b1 g8f6 b1c3 f6g8 c3b1'.split(' ')) {
+    chess.move(uciToMove(u));
+    counts.push(repetitionCount(chess));
+  }
+  // after d2d4 the position (e4xd3 e.p. is illegal: Ra4 pins the e4 pawn) occurs once; it recurs
+  // after every ...Ng8/Nb1 cycle
+  assert.deepEqual(counts, [1, 1, 1, 1, 2, 2, 2, 2, 3]);
+  assert.equal(chess.isThreefoldRepetition(), false, 'chess.js undercounts here (that is the bug)');
+  assert.equal(positionRepeated(chess), true);
+  assert.equal(encodeBoard(chess)[19 * 64], 1);
+});
+
+test('repetitionCount agrees with chess.js on an ordinary knight shuffle', () => {
+  const chess = new Chess();
+  const cycle = 'g1f3 g8f6 f3g1 f6g8'.split(' ');
+  assert.equal(repetitionCount(chess), 1);
+  for (const u of cycle) chess.move(uciToMove(u));
+  assert.equal(repetitionCount(chess), 2);
+  assert.equal(chess.isThreefoldRepetition(), false);
+  for (const u of cycle) chess.move(uciToMove(u));
+  assert.equal(repetitionCount(chess), 3);
+  assert.equal(chess.isThreefoldRepetition(), true);
+  // a different position (side to move differs) is not a repetition
+  chess.move(uciToMove('e2e4'));
+  assert.equal(repetitionCount(chess), 1);
+});

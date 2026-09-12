@@ -4,6 +4,7 @@
 
 import { Chess } from './vendor/chess.js';
 import { Board } from './board.js';
+import { repetitionCount } from './engine/encoding.js';
 
 const $ = (id) => document.getElementById(id);
 const DIFF_LABEL = { larva: 'Larva', fly: 'Fly', superfly: 'Superfly' };
@@ -14,54 +15,104 @@ const plural = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
 const fmtClock = (ms) => { const s = Math.round(ms / 1000); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`; };
 
 // ============================================================================ worker client
+// A request that gets no answer (result, error or 'thinking' progress) for this long is treated as a
+// dead worker: terminate()/OOM kills fire no onerror, so without it a move would hang forever.
+const REQUEST_TIMEOUT_MS = 60_000;
+
 class Brain {
   constructor() {
-    this.worker = new Worker('./engine/worker.js', { type: 'module' });
     this.pending = new Map();
     this.nextId = 1;
     this.ready = null;
     this.info = null;
+    this.dead = false;
+    this.baseUrl = null;
     this.onProgress = () => {};
     this.onThinking = () => {};
+    this._spawn();
+  }
+
+  _spawn() {
+    this.worker = new Worker('./engine/worker.js', { type: 'module' });
     this.worker.onmessage = (ev) => this._onMessage(ev.data);
-    this.worker.onerror = (ev) => { this._fail(new Error(ev.message || 'worker crashed')); };
+    this.worker.onerror = (ev) => { this.dead = true; this._fail(new Error(ev.message || 'worker crashed')); };
   }
 
   load(baseUrl = 'model/') {
+    this.baseUrl = baseUrl;
+    this.dead = false;
     this.ready = new Promise((resolve, reject) => { this._resolveReady = resolve; this._rejectReady = reject; });
     this.worker.postMessage({ type: 'load', baseUrl });
     return this.ready;
   }
 
+  /** Fresh worker + reload. Requests are stateless (the worker replays msg.moves from the start
+   *  position), so nothing else needs restoring. Any in-flight request is rejected. */
+  restart() {
+    try { this.worker.terminate(); } catch { /* already gone */ }
+    this._fail(new Error('restarting'));
+    this._spawn();
+    return this.load(this.baseUrl || 'model/');
+  }
+
   _fail(err) {
     this._rejectReady?.(err);
-    for (const [, p] of this.pending) p.reject(err);
+    for (const [, p] of this.pending) { clearTimeout(p.timer); p.reject(err); }
     this.pending.clear();
+  }
+
+  _settle(id, fn) {
+    const p = this.pending.get(id);
+    if (!p) return;
+    this.pending.delete(id); clearTimeout(p.timer); fn(p);
   }
 
   _onMessage(msg) {
     if (msg.type === 'progress') { this.onProgress(msg); return; }
     if (msg.type === 'ready') { this.info = msg; this._resolveReady?.(msg); return; }
-    if (msg.type === 'thinking') { this.onThinking(msg); return; }
+    if (msg.type === 'thinking') {
+      const p = this.pending.get(msg.id);
+      if (!p || p.cancelled) return;      // progress of an abandoned (or unknown) search must not leak into the UI
+      p.touch(); this.onThinking(msg); return;
+    }
     if (msg.type === 'error') {
-      if (msg.id && this.pending.has(msg.id)) { this.pending.get(msg.id).reject(new Error(msg.message)); this.pending.delete(msg.id); }
+      if (msg.id && this.pending.has(msg.id)) this._settle(msg.id, (p) => p.reject(new Error(msg.message)));
       else this._fail(new Error(msg.message));
       return;
     }
-    const p = this.pending.get(msg.id);
-    if (p) { this.pending.delete(msg.id); p.resolve(msg); }
+    this._settle(msg.id, (p) => p.resolve(msg));
   }
 
   _request(payload) {
     const id = this.nextId++;
     return new Promise((resolve, reject) => {
-      this.pending.set(id, { resolve, reject });
+      const p = { resolve, reject, timer: 0, type: payload.type, cancelled: false };
+      p.touch = () => {
+        clearTimeout(p.timer);
+        p.timer = setTimeout(() => {
+          this.dead = true;   // the next restart() replaces the silent worker
+          this._settle(id, () => reject(new Error(`no answer from the fly brain after ${REQUEST_TIMEOUT_MS / 1000} s`)));
+        }, REQUEST_TIMEOUT_MS);
+      };
+      this.pending.set(id, p);
+      p.touch();
       this.worker.postMessage({ ...payload, id });
     });
   }
 
   move(fen, moves, difficulty) { return this._request({ type: 'move', fen, moves, difficulty }); }
   eval(fen, moves) { return this._request({ type: 'eval', fen, moves }); }
+
+  /** Abandon every in-flight move request: the worker stops a running superfly search within a few
+   *  simulations (and skips queued ones) instead of finishing it before the next game's first move.
+   *  The promise still settles (with `cancelled: true`) once the worker acknowledges. */
+  cancelMoves() {
+    for (const [id, p] of this.pending) {
+      if (p.type !== 'move' || p.cancelled) continue;
+      p.cancelled = true;
+      this.worker.postMessage({ type: 'cancel', id });
+    }
+  }
 }
 
 // ============================================================================ sounds (WebAudio, synthesised)
@@ -324,9 +375,14 @@ class App {
     } catch { /* decorative */ }
   }
 
-  _startLoading() {
+  _startLoading({ retry = false } = {}) {
     const fill = $('bar-fill'), bytes = $('load-bytes'), neurons = $('load-neurons').querySelector('b');
     let n = 0, shown = 0, tick = 0;
+    if (retry) {   // back to the initial "growing" state before the bar moves again
+      $('load-error').hidden = true; $('loading').hidden = false;
+      this._loadFrac = 0; fill.style.width = '0%'; bytes.textContent = 'connecting…'; neurons.textContent = '0';
+      $('btn-start').querySelector('.btn-start-label').textContent = 'Growing the fly brain…';
+    }
     const animateCount = () => {
       const goal = n * Math.min(1, this._loadFrac || 0);
       if (Math.abs(goal - shown) > 1) { shown += (goal - shown) * 0.2; neurons.textContent = fmtInt(Math.round(shown)); tick = requestAnimationFrame(animateCount); } else tick = 0;
@@ -340,7 +396,9 @@ class App {
       bytes.textContent = m.phase === 'decode' ? 'wiring synapses…' : m.total ? `${(m.loaded / 1e6).toFixed(1)} MB / ${(m.total / 1e6).toFixed(1)} MB` : `${(m.loaded / 1e6).toFixed(1)} MB`;
       if (!tick) tick = requestAnimationFrame(animateCount);
     };
-    this.brain.load(new URL('model/', location.href).href).then((info) => {
+    const url = new URL('model/', location.href).href;
+    // a retry always gets a fresh worker: the old one may have died, or be stuck mid-decode
+    (retry ? this.brain.restart() : this.brain.load(url)).then((info) => {
       const h = info.header;
       this._loadFrac = 1; fill.style.width = '100%';
       neurons.textContent = fmtInt(h.n);
@@ -355,9 +413,16 @@ class App {
       $('btn-start').querySelector('.btn-start-label').textContent = 'Play the fly';
       $('loading').hidden = true;
     }).catch((err) => {
+      if (tick) { cancelAnimationFrame(tick); tick = 0; }
+      $('loading').hidden = true;
       const el = $('load-error');
       el.hidden = false;
-      el.innerHTML = `The fly brain could not be loaded (${escapeHtml(err.message)}). The model files live in <code>web/model/</code>; export them with <code>fly export-web --run &lt;name&gt;</code>, then serve the site (<code>scripts/serve-web.sh</code>).`;
+      const local = ['localhost', '127.0.0.1', '[::1]'].includes(location.hostname);
+      const hint = local
+        ? ` The model files live in <code>web/model/</code>; export them with <code>fly export-web --run &lt;name&gt;</code>, then serve the site (<code>scripts/serve-web.sh</code>).`
+        : '';
+      el.innerHTML = `Could not download the fly brain — check your connection and try again.${hint} <button class="btn btn-small" id="btn-retry-load" type="button">Retry</button><br><small class="mono dim">${escapeHtml(err.message)}</small>`;
+      $('btn-retry-load').addEventListener('click', () => this._startLoading({ retry: true }));
       $('btn-start').querySelector('.btn-start-label').textContent = 'No fly brain found';
     });
   }
@@ -379,15 +444,19 @@ class App {
 
   // ---------------------------------------------------------------- ui wiring
   _bindUI() {
-    $('btn-start').addEventListener('click', () => this.newGame({
-      difficulty: document.querySelector('input[name=difficulty]:checked').value,
-      color: document.querySelector('input[name=color]:checked').value,
-      name: $('player-name').value.trim() || 'Human',
-    }));
+    $('btn-start').addEventListener('click', () => {
+      this.party = null;   // the landing form always starts a solo game
+      this.newGame({
+        difficulty: document.querySelector('input[name=difficulty]:checked').value,
+        color: document.querySelector('input[name=color]:checked').value,
+        name: $('player-name').value.trim() || 'Human',
+      });
+    });
     $('brand').addEventListener('click', (e) => { e.preventDefault(); this.showLanding(); });
     $('btn-new').addEventListener('click', () => { if (this.party) this.newGame({ ...this.state.opts, name: this.party.names[this.party.current] }); else this.showLanding(); });
     $('btn-undo').addEventListener('click', () => this.undo());
-    $('btn-flip').addEventListener('click', () => this.board?.flip());
+    $('btn-flip').addEventListener('click', () => this.flip());
+    $('btn-retry').addEventListener('click', () => this.retryFlyMove());
     $('btn-resign').addEventListener('click', () => this.resign());
     $('btn-pgn').addEventListener('click', () => this.copyText(this.pgn(), 'PGN copied'));
     $('btn-sound').addEventListener('click', () => {
@@ -406,18 +475,30 @@ class App {
     $('btn-copy-image').addEventListener('click', () => this.copyImage());
     $('btn-download-image').addEventListener('click', () => this.downloadImage());
     $('btn-copy-text').addEventListener('click', () => this.copyText(this.shareText(), 'Copied'));
+    $('player-name').addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && !$('btn-start').disabled) { e.preventDefault(); $('btn-start').click(); }
+    });
     document.addEventListener('keydown', (e) => {
       if (e.target.matches('input, textarea') || !this.state) return;
-      if (e.key === 'f') this.board?.flip();
+      if (e.key === 'Escape') this.board?.cancelPromotion();
+      if (document.querySelector('dialog[open]')) return;   // no board shortcuts behind an open modal
+      if (e.key === 'f' && !e.ctrlKey && !e.metaKey && !e.altKey) this.flip();   // plain f only: Ctrl+F is find
       if (e.key === 'z' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); this.undo(); }
     });
     this.brain.onThinking = (m) => { $('clk-sims').textContent = `${m.done}/${m.total}`; };
   }
 
   showLanding() {
+    this.party = null; this.renderPartyBar();   // leaving the board ends the party; later games are solo
     $('screen-game').hidden = true; $('screen-landing').hidden = false;
     this.viz.setThinking(false); this.sounds.stopBuzz();
     window.scrollTo({ top: 0 });
+  }
+
+  flip() {
+    if (!this.board) return;
+    this.board.flip();
+    if (this.state) this.updateTurn();   // the who-top / who-bottom labels follow the orientation
   }
 
   toast(msg) {
@@ -434,6 +515,7 @@ class App {
       moves: [], thinkTotal: 0, lastThink: 0, sims: 0, result: null, started: performance.now(), thinking: false, lastValue: 0,
     };
     this.pendingMoveId++;
+    this.brain.cancelMoves();
     if (!this.board) {
       this.board = new Board($('board'), { onMove: (f, t, p) => this.humanMove(f, t, p), orientation: color });
     } else this.board.setOrientation(color);
@@ -470,6 +552,7 @@ class App {
     $('who-top').innerHTML = who(top); $('who-bottom').innerHTML = who(top === 'w' ? 'b' : 'w');
     const st = $('status');
     st.classList.toggle('over', !!s.result);
+    st.classList.remove('error'); $('btn-retry').hidden = true;
     if (s.result) st.textContent = s.result.text;
     else if (this.chess.isCheck()) st.textContent = humanTurn ? 'Check! Your move.' : 'The fly is in check…';
     else st.textContent = humanTurn ? 'Your move.' : 'The fly is thinking…';
@@ -519,8 +602,12 @@ class App {
     try {
       r = await this.brain.move(fen, s.moves.slice(), s.difficulty);
     } catch (err) {
-      this.toast(`The fly brain failed: ${err.message}`);
-      s.thinking = false; this.viz.setThinking(false); this.sounds.stopBuzz(); return;
+      if (id !== this.pendingMoveId || this.state !== s) return;   // game was reset meanwhile: leave the new game's UI alone
+      s.thinking = false; this.viz.setThinking(false); this.sounds.stopBuzz();
+      $('commentary').classList.remove('fade');
+      this.setMood('nervous', `The fly brain crashed (${err.message}).`);
+      this.showRetry('The fly brain crashed.');
+      return;
     }
     if (id !== this.pendingMoveId || this.state !== s) return;   // game was reset meanwhile
     s.thinking = false;
@@ -535,11 +622,34 @@ class App {
     const mv = this.chess.move({ from: r.move.slice(0, 2), to: r.move.slice(2, 4), promotion: r.move[4] || undefined });
     s.lastThink = r.thinkMs; s.thinkTotal += r.thinkMs; s.sims = r.sims; s.lastValue = r.value;
     $('clk-last').textContent = fmtMs(r.thinkMs); $('clk-total').textContent = fmtMs(s.thinkTotal);
-    $('clk-sims').textContent = s.difficulty === 'superfly' ? `${r.sims}` : (r.sims ? `${r.sims}-ply check` : 'policy only');
+    $('clk-sims').textContent = s.difficulty === 'superfly' ? `${r.sims} sims` : (r.sims ? `1-ply × ${r.sims}` : 'policy only');
     this.viz.setActivity(r.activitySample);
     this.setValue(r.value);
     this.setMood(moodFor(r.value), commentaryFor({ policyTop: r.policyTop, value: r.value, san: mv.san, difficulty: s.difficulty, sims: r.sims }));
     this.applyMove(mv);
+  }
+
+  /** Persistent way out of a failed fly move (a toast alone would leave the board locked forever). */
+  showRetry(text) {
+    const st = $('status');
+    st.textContent = text; st.classList.add('error');
+    $('btn-retry').hidden = false;
+  }
+
+  async retryFlyMove() {
+    const s = this.state;
+    if (!s || s.result || s.thinking) return;
+    $('btn-retry').hidden = true; $('status').classList.remove('error');
+    $('status').textContent = 'The fly is thinking…';
+    if (this.brain.dead) {
+      try { await this.brain.restart(); } catch (err) {
+        if (this.state !== s || s.result) return;
+        this.toast(`Reload failed: ${err.message}`);
+        this.showRetry('The fly brain could not be reloaded.');
+        return;
+      }
+    }
+    if (this.state === s && !s.result && !s.thinking) this.flyMove();
   }
 
   undo() {
@@ -558,20 +668,23 @@ class App {
   resign() {
     const s = this.state;
     if (!s || s.result) return;
-    this.pendingMoveId++; s.thinking = false; this.viz.setThinking(false); this.sounds.stopBuzz();
+    this.pendingMoveId++; this.brain.cancelMoves(); s.thinking = false; this.viz.setThinking(false); this.sounds.stopBuzz();
     this.finish({ outcome: 'loss', reason: 'resignation', text: 'You resigned. The fly wins.' });
   }
 
   checkGameOver() {
     const c = this.chess;
-    if (!c.isGameOver()) return false;
+    // chess.js' hash-based threefold check misses repetitions whose first occurrence followed a
+    // double push with a pinned (illegal) en-passant capture; the FEN-based count does not
+    const threefold = repetitionCount(c) >= 3;
+    if (!c.isGameOver() && !threefold) return false;
     const s = this.state;
     if (c.isCheckmate()) {
       const winner = c.turn() === 'w' ? 'b' : 'w';
       const humanWon = winner === s.human;
       this.finish({ outcome: humanWon ? 'win' : 'loss', reason: 'checkmate', text: humanWon ? 'Checkmate! You beat the fly.' : 'Checkmate. The fly wins.' });
     } else {
-      const reason = c.isStalemate() ? 'stalemate' : c.isThreefoldRepetition() ? 'threefold repetition' : c.isInsufficientMaterial() ? 'insufficient material' : 'fifty-move rule';
+      const reason = c.isStalemate() ? 'stalemate' : threefold ? 'threefold repetition' : c.isInsufficientMaterial() ? 'insufficient material' : 'fifty-move rule';
       this.finish({ outcome: 'draw', reason, text: `Draw by ${reason}.` });
     }
     return true;
@@ -714,7 +827,7 @@ class App {
     svg.setAttribute('width', '480'); svg.setAttribute('height', '480');
     const css = getComputedStyle(document.documentElement);
     const v = (n) => css.getPropertyValue(n).trim();
-    svg.querySelectorAll('.cb-dots, .cb-promo, .cb-coords').forEach((e) => e.remove());
+    svg.querySelectorAll('.cb-dots, .cb-promo, .cb-coords, .cb-cursor').forEach((e) => e.remove());
     const style = document.createElementNS('http://www.w3.org/2000/svg', 'style');
     style.textContent = `.cb-light{fill:${v('--sq-light')}}.cb-dark{fill:${v('--sq-dark')}}.cb-last{fill:${v('--hl-last')}}.cb-check{fill:${v('--hl-check')}}.cb-selected{fill:none}
       .cb-piece{stroke-width:3;stroke-linejoin:round}.cb-w{fill:${v('--piece-w')};stroke:${v('--piece-w-ink')}}.cb-w .ink{fill:${v('--piece-w-ink')};stroke:${v('--piece-w-ink')}}

@@ -25,7 +25,10 @@ class BrainConfig:
     num_moves : int           policy head outputs.
     weight_init_scale : float mean row-sum of |w| at init (see ``FlyBrain.init_syn_gain``).
     dale : bool               enforce synapse signs (``w = sign · softplus(gain)``); False = free sign.
-    dtype : str               parameter dtype of the dense parts ('float32' recommended; use autocast for bf16).
+    dtype : str               parameter dtype of the dense parts (``w_in``/``b_in`` and the heads); the recurrent
+                              ``syn_gain``/``bias``/``leak_logit`` are always float32 ('float32' + autocast is the
+                              recommended way to get bf16 compute; a bf16 parameter dtype has no fp32 master
+                              weights, so small updates to the dense parts can round away).
     value_hidden : int        hidden width of the value MLP; 0 = plain ``Linear(n_out, 1)``.
     """
 

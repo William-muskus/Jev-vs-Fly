@@ -47,6 +47,7 @@ from flychess.chessenv.encoding import (
 from flychess.connectome.graph import BrainGraph
 from flychess.data.shards import planes_to_float
 from flychess.model.flybrain import FlyBrain, masked_policy_log_softmax
+from flychess.train.imitation import adapt_optim_state, param_groups
 from flychess.train.mcts import (
     BatchedMCTS,
     Node,
@@ -607,13 +608,17 @@ def run_selfplay_stage(
 
     buffer = ReplayBuffer(int(_get(cfg, "replay_buffer_size", 200_000)),
                           k=max(64, int(_get(cfg, "mcts_sims", 64))), seed=seed + completed_iters)
-    optim = torch.optim.AdamW(model.parameters(), lr=float(_get(cfg, "selfplay_lr", 2e-4)),
-                              weight_decay=float(_get(cfg, "weight_decay", 1e-4)))
+    weight_decay = float(_get(cfg, "weight_decay", 1e-4))
+    groups = param_groups(model, weight_decay)  # same decay rule as imitation: no decay on syn_gain (Dale) / biases
+    optim = torch.optim.AdamW(groups, lr=float(_get(cfg, "selfplay_lr", 2e-4)), weight_decay=weight_decay)
     if optim_state is not None:
         try:
-            optim.load_state_dict(optim_state)
+            optim.load_state_dict(adapt_optim_state(optim_state, model, weight_decay, groups))
         except (ValueError, KeyError, RuntimeError) as e:
             log.warning("could not restore the self-play optimizer state (%r): starting it fresh", e)
+        else:
+            for g, fresh in zip(optim.param_groups, groups, strict=True):
+                g["weight_decay"] = fresh["weight_decay"]  # the checkpoint's decay must not win over cfg
     step = int(start_step)
     total_steps = start_step + (iters - completed_iters) * steps_per_iter
     t_stage = time.time()

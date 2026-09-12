@@ -13,7 +13,7 @@ from flychess.data.lichess import build_shards
 from flychess.data.shards import list_shards
 from flychess.model.config import BrainConfig
 from flychess.train.config import TrainConfig, load_config, resolve_graph_path
-from flychess.train.imitation import lr_at, param_groups, planned_steps
+from flychess.train.imitation import adapt_optim_state, lr_at, param_groups, planned_steps
 from flychess.train.metrics import read_metrics, read_run_json
 from flychess.train.trainer import cuda_mem_gb, load_checkpoint, resolve_checkpoint, save_checkpoint, train
 
@@ -70,6 +70,10 @@ def test_config_roundtrip_and_overrides(tmp_path):
     if default_yaml.exists():
         d = TrainConfig.from_yaml(default_yaml)
         assert d.graph == "full" and d.batch_size == 256 and d.lr == 1e-3 and d.epochs == 1
+        # the yaml must not drift from the built-in defaults (`fly train --run fly1` without --config),
+        # in particular shard_name must accept whatever `fly build-shards` wrote (default name "lichess")
+        assert d.shard_name is None
+        assert d.to_dict() == TrainConfig().to_dict()
 
 
 def test_lr_schedule_and_planned_steps():
@@ -96,8 +100,46 @@ def test_param_groups_exclude_biases_and_leaks():
     no_decay = {id(p) for p in groups[1]["params"]}
     assert id(model.bias) in no_decay and id(model.leak_logit) in no_decay and id(model.b_in) in no_decay
     assert id(model.policy_head.bias) in no_decay
-    assert id(model.syn_gain) in decay and id(model.w_in) in decay and id(model.policy_head.weight) in decay
+    assert id(model.w_in) in decay and id(model.policy_head.weight) in decay
     assert len(decay) + len(no_decay) == len(list(model.parameters()))
+    # Dale: |w| = softplus(syn_gain), so decaying the logit would pull synapses toward ln 2, not 0 -> no decay
+    assert model.dale and id(model.syn_gain) in no_decay
+    assert id(model.syn_gain) in {id(p) for p in param_groups(model, 0.1, decay_syn_gain=True)[0]["params"]}
+    free = FlyBrain(graph, BrainConfig(graph_path=str(TINY_GRAPH), steps=2, value_hidden=8, dale=False))
+    assert id(free.syn_gain) in {id(p) for p in param_groups(free, 0.1)[0]["params"]}  # w = gain: decay is real
+
+
+@needs_tiny
+def test_adapt_optim_state_remaps_legacy_layouts():
+    """Checkpoints written with syn_gain in the decayed group (or self-play's single group) stay resumable."""
+    from flychess.model.flybrain import FlyBrain
+
+    graph = BrainGraph.load(TINY_GRAPH)
+    model = FlyBrain(graph, BrainConfig(graph_path=str(TINY_GRAPH), steps=2, value_hidden=8))
+    legacy_groups = [param_groups(model, 0.1, decay_syn_gain=True),
+                     [{"params": list(model.parameters()), "weight_decay": 0.1}]]
+    for groups in legacy_groups:
+        old = torch.optim.AdamW(groups, lr=1e-3)
+        for p in model.parameters():
+            p.grad = torch.randn_like(p)
+        old.step()
+        saved = old.state_dict()
+        new = torch.optim.AdamW(param_groups(model, 0.1), lr=1e-3)
+        with pytest.raises(ValueError):
+            new.load_state_dict(saved)  # positional group sizes differ -> torch refuses the raw state
+        adapted = adapt_optim_state(saved, model, 0.1)
+        assert [len(g["params"]) for g in adapted["param_groups"]] == [len(g["params"]) for g in new.param_groups]
+        assert [g["weight_decay"] for g in adapted["param_groups"]] == [0.1, 0.0]
+        new.load_state_dict(adapted)
+        for p in model.parameters():  # every parameter keeps its own moments
+            torch.testing.assert_close(new.state[p]["exp_avg"], old.state[p]["exp_avg"])
+            torch.testing.assert_close(new.state[p]["exp_avg_sq"], old.state[p]["exp_avg_sq"])
+        assert saved["param_groups"] is not adapted["param_groups"]  # the checkpoint dict itself is untouched
+    # a state that already matches, or an unknown layout, passes through unchanged
+    fresh = torch.optim.AdamW(param_groups(model, 0.1), lr=1e-3).state_dict()
+    assert adapt_optim_state(fresh, model, 0.1) is fresh
+    odd = {"state": {}, "param_groups": [{"params": [0, 1], "lr": 1e-3}]}
+    assert adapt_optim_state(odd, model, 0.1) is odd
 
 
 # ---- imitation + trainer -------------------------------------------------------------------------
@@ -278,6 +320,34 @@ def test_resume_applies_new_weight_decay(shards, runs_dir):
 
 
 @needs_tiny
+def test_resume_from_checkpoint_with_decayed_syn_gain_layout(shards, runs_dir, capsys):
+    """A checkpoint saved when syn_gain was still in the decayed group (runs/fly1) resumes with its AdamW moments."""
+    from flychess.model.flybrain import FlyBrain
+
+    cfg = tiny_cfg(shards, max_steps=4, log_every=100, eval_every=100, checkpoint_every=100, elo_every=0)
+    train("legacy", stage="imitation", config=cfg)
+    latest = runs_dir / "legacy" / "latest.pt"
+    raw = torch.load(latest, map_location="cpu", weights_only=False)
+    graph = BrainGraph.load(TINY_GRAPH)
+    model = FlyBrain(graph, cfg.brain_config(str(TINY_GRAPH)))
+    current, legacy = param_groups(model, cfg.weight_decay), param_groups(model, cfg.weight_decay, decay_syn_gain=True)
+    saved_index = {id(p): i for g, sg in zip(current, raw["optim"]["param_groups"], strict=True)
+                   for p, i in zip(g["params"], sg["params"], strict=True)}
+    raw["optim"]["param_groups"] = [dict(sg, params=[saved_index[id(p)] for p in g["params"]])
+                                    for g, sg in zip(legacy, raw["optim"]["param_groups"], strict=True)]
+    sizes = [len(g["params"]) for g in raw["optim"]["param_groups"]]  # latest.pt now has the pre-fix layout
+    assert sizes != [len(g["params"]) for g in current]
+    torch.save(raw, latest)
+    capsys.readouterr()
+    latest = train("legacy", stage="imitation", config=cfg.replace(max_steps=6), resume=True)
+    assert "optimizer state not restored" not in capsys.readouterr().out
+    raw = torch.load(latest, map_location="cpu", weights_only=False)
+    assert raw["step"] == 6
+    assert [g["weight_decay"] for g in raw["optim"]["param_groups"]] == [cfg.weight_decay, 0.0]
+    assert all(int(st["step"]) == 6 for st in raw["optim"]["state"].values())  # moments continued, not reset
+
+
+@needs_tiny
 def test_interrupt_in_final_elo_keeps_final_weights(shards, runs_dir, monkeypatch):
     """Ctrl-C during the end-of-training eval/Elo used to lose every step since the last periodic checkpoint."""
     from flychess.train import imitation
@@ -340,3 +410,42 @@ def test_resume_with_epochs_zero_continues_data_cycle(shards, runs_dir, monkeypa
     latest = train("cyc", stage="imitation", config=base.replace(max_steps=spe + 3), resume=True)
     assert calls == [1], calls  # continues in epoch 1, does not replay epoch 0
     assert load_checkpoint(latest)[2]["step"] == spe + 3
+
+
+@needs_tiny
+def test_resume_inside_epoch_continues_with_unseen_batches(shards, runs_dir, monkeypatch):
+    """A resume at step S used to replay batches 1..S of the epoch (and, with epochs=1, never reach its tail)."""
+    import hashlib
+
+    from flychess.train import imitation
+
+    seen: list[str] = []
+    real_collate = imitation.collate
+
+    def recording_collate(batch):  # num_workers=0 only: worker processes would not share `seen`
+        out = real_collate(batch)
+        seen.append(hashlib.md5(out["planes"].numpy().tobytes()).hexdigest())
+        return out
+
+    monkeypatch.setattr(imitation, "collate", recording_collate)
+    base = tiny_cfg(shards, epochs=1, num_workers=0, eval_batches=1, log_every=100, eval_every=1000,
+                    checkpoint_every=1000, elo_every=0)
+    train("fresh", stage="imitation", config=base.replace(max_steps=12))
+    fresh = [h for h in seen if h not in seen[:1]]  # drop the ValCache batch (first collate call)
+    val_hash, seen[:] = seen[0], []
+    assert len(fresh) == 12
+    train("part", stage="imitation", config=base.replace(max_steps=6))
+    first = [h for h in seen if h != val_hash]
+    seen.clear()
+    assert first == fresh[:6]
+    latest = train("part", stage="imitation", config=base.replace(max_steps=12), resume=True)
+    resumed = [h for h in seen if h != val_hash]
+    assert load_checkpoint(latest)[2]["step"] == 12
+    # the loader is replayed past the 6 already-trained batches, then the run trains on batches 7..12
+    assert resumed == fresh, (resumed[:3], fresh[:3])
+    status = read_metrics(runs_dir / "part", kinds=["status"])
+    assert any("skipping 6" in s["message"] for s in status)
+    steps = [r["step"] for r in read_metrics(runs_dir / "part", kinds=["train"])]
+    assert steps == [6, 12]  # log_every=100: the two runs log their final step only; nothing trained twice
+    fresh_last = read_metrics(runs_dir / "fresh", kinds=["train"])[-1]
+    assert read_metrics(runs_dir / "part", kinds=["train"])[-1]["loss"] == fresh_last["loss"]  # same data, same loss

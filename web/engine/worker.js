@@ -5,18 +5,24 @@
 // Messages in:  {type:'load', baseUrl}
 //               {type:'move', id, fen, moves:[uci...], difficulty:'larva'|'fly'|'superfly'}
 //               {type:'eval', id, fen, moves:[uci...]}
+//               {type:'cancel', id}     abandon the move request `id` (a running superfly search stops
+//                                       within a few simulations; a queued one is skipped)
 // Messages out: {type:'progress', loaded, total, phase, n, nnz, runName}
 //               {type:'ready', header, sample:{idx, xy, cls}, silhouette:{xy, cls}, legend, fromCache, bytes}
 //               {type:'thinking', id, done, total}            (superfly only, every 10 simulations)
 //               {type:'move', id, move, san, policyTop, value, activitySample, thinkMs, sims, stepMs}
+//               {type:'move', id, move:null, cancelled:true}  (reply to a cancelled request)
 //               {type:'eval', id, value, policyTop, activitySample}
 //               {type:'error', id?, message}
+//
+// Requests are handled strictly one at a time (they share one chess.js instance); `cancel` is the
+// only message acted on immediately.
 
 import { Chess } from '../vendor/chess.js';
 import * as enc from './encoding.js';
 import { loadBrain } from './loader.js';
 import { FlyBrain, policyForLegal, sampleIndex, topK } from './flybrain.js';
-import { runMCTS, uciOf } from './mcts.js';
+import { runMCTSAsync, uciOf } from './mcts.js';
 
 const SAMPLE_N = 2048;
 const SILHOUETTE_N = 6000;
@@ -30,17 +36,30 @@ let brain = null;
 let sampleIdx = null;         // Int32Array(SAMPLE_N) fixed at load
 const chess = new Chess();
 
-self.onmessage = async (ev) => {
+let queue = Promise.resolve();          // requests run one after another
+let activeSearch = null;                // {id, cancelled} while a superfly search is in flight
+const cancelledIds = new Set();         // cancelled requests not yet dispatched
+
+self.onmessage = (ev) => {
   const msg = ev.data;
+  if (msg.type === 'cancel') {
+    if (activeSearch && activeSearch.id === msg.id) activeSearch.cancelled = true;
+    else { cancelledIds.add(msg.id); if (cancelledIds.size > 256) cancelledIds.clear(); }
+    return;
+  }
+  queue = queue.then(() => dispatch(msg));
+};
+
+async function dispatch(msg) {
   try {
     if (msg.type === 'load') await handleLoad(msg);
-    else if (msg.type === 'move') handleMove(msg);
+    else if (msg.type === 'move') await handleMove(msg);
     else if (msg.type === 'eval') handleEval(msg);
     else if (msg.type === 'bench') handleBench(msg);
   } catch (err) {
     self.postMessage({ type: 'error', id: msg.id, message: String(err && err.message || err) });
   }
-};
+}
 
 async function handleLoad(msg) {
   // relative URLs are resolved against the page by app.js; resolve against this script otherwise
@@ -143,7 +162,11 @@ function activitySample(activity) {
   return out;
 }
 
-function handleMove(msg) {
+async function handleMove(msg) {
+  if (cancelledIds.delete(msg.id)) {
+    self.postMessage({ type: 'move', id: msg.id, move: null, san: null, cancelled: true, policyTop: [], value: 0, activitySample: null, thinkMs: 0, sims: 0 });
+    return;
+  }
   requireBrain();
   const t0 = performance.now();
   setPosition(msg.fen, msg.moves);
@@ -170,7 +193,7 @@ function handleMove(msg) {
       chess.move(moves[i]);
       let oppValue;
       if (chess.isCheckmate()) oppValue = -1;
-      else if (chess.isDraw()) oppValue = 0;
+      else if (chess.isDraw() || enc.repetitionCount(chess) >= 3) oppValue = 0;
       else oppValue = brain.forward(enc.encodeBoard(chess)).value;
       chess.undo();
       const score = -oppValue;       // our value = negated opponent value
@@ -180,10 +203,21 @@ function handleMove(msg) {
     value = bestScore;
     sims = cands.length;
   } else {
-    const out = runMCTS(brain, chess, enc, {
-      sims: cfg.sims, cPuct: 1.5, dirichletAlpha: 0, temperature: 0,
-      onProgress: (done, total) => { if (done % 10 === 0) self.postMessage({ type: 'thinking', id: msg.id, done, total }); },
-    });
+    activeSearch = { id: msg.id, cancelled: false };
+    let out;
+    try {
+      out = await runMCTSAsync(brain, chess, enc, {
+        sims: cfg.sims, cPuct: 1.5, dirichletAlpha: 0, temperature: 0, yieldEvery: 10,
+        shouldStop: () => activeSearch.cancelled,
+        onProgress: (done, total) => { if (done % 10 === 0) self.postMessage({ type: 'thinking', id: msg.id, done, total }); },
+      });
+    } finally {
+      activeSearch = null;
+    }
+    if (out.stopped) {
+      self.postMessage({ type: 'move', id: msg.id, move: null, san: null, cancelled: true, policyTop: [], value: 0, activitySample: null, thinkMs: performance.now() - t0, sims: out.sims });
+      return;
+    }
     chosen = out.moveObj;
     value = out.rootValue;
     sims = out.sims;

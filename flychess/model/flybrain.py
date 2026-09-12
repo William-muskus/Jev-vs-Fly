@@ -80,6 +80,9 @@ class FlyBrain(nn.Module):
                              followed by ``tanh``. ``act`` is the *same* non-linearity as the recurrence
                              (``config.activation``); the export records it as ``header['value_activation']``
                              so the JS/numpy engines never have to guess it.
+    ``syn_gain``, ``bias`` and ``leak_logit`` are always float32 regardless of ``config.dtype`` (which
+    only sets the dtype of ``w_in``/``b_in`` and the heads): under bf16 their optimiser steps would be
+    smaller than an ulp and the connectome would never learn.
     Buffers: ``sign (nnz,) float``, ``input_idx (n_in,) int64``, ``output_idx (n_out,) int64``,
     ``syn_count (nnz,) float``; plus the non-persistent CSR pattern (``csr_indptr``, ``csr_indices``,
     ``crow_t``, ``col_t``, ``perm_t``) which is fully determined by the graph.
@@ -115,9 +118,16 @@ class FlyBrain(nn.Module):
         init_gain = self.init_syn_gain(self.syn_count, self.csr_indptr, config.weight_init_scale)
         if not self.dale:
             init_gain = self.sign * F.softplus(init_gain)  # free-sign weights start at the Dale init
-        self.syn_gain = nn.Parameter(init_gain.to(dtype))
-        self.bias = nn.Parameter(torch.zeros(self.n, dtype=dtype))
-        self.leak_logit = nn.Parameter(torch.full((self.n,), math.log(config.alpha / (1 - config.alpha)), dtype=dtype))
+        # The recurrent parameters are always float32, whatever ``config.dtype`` says: the forward
+        # upcasts them anyway (see ``effective_weights``/``leak``), and in bf16 the initial gains
+        # (~ -2.5..-4.5, ulp ~ 0.016..0.03) would swallow every optimiser step (~ lr = 1e-3), silently
+        # freezing the whole connectome while biases/heads keep learning. ``config.dtype`` only
+        # governs the dense parts (``w_in``/``b_in`` and the heads); prefer float32 + autocast.
+        self.syn_gain = nn.Parameter(init_gain.float())
+        self.bias = nn.Parameter(torch.zeros(self.n, dtype=torch.float32))
+        self.leak_logit = nn.Parameter(
+            torch.full((self.n,), math.log(config.alpha / (1 - config.alpha)), dtype=torch.float32)
+        )
         self.w_in = nn.Parameter(torch.empty(self.n_in, config.input_dim, dtype=dtype))
         self.b_in = nn.Parameter(torch.zeros(self.n_in, dtype=dtype))
         nn.init.kaiming_uniform_(self.w_in, a=math.sqrt(5))
