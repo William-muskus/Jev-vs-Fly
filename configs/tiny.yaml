@@ -25,7 +25,7 @@ epochs: 1
 max_steps: 30
 value_loss_weight: 1.0
 grad_clip: 1.0
-amp: true
+amp: false
 grad_checkpoint: false
 
 log_every: 5

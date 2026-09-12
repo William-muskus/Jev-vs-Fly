@@ -28,7 +28,7 @@ epochs: 1
 max_steps: null                # optional absolute step cap
 value_loss_weight: 1.0
 grad_clip: 1.0
-amp: true                      # bf16 autocast on the dense parts, SpMM in fp32
+amp: false                     # keep fp32: bf16 autocast on the dense parts corrupts the loss once recurrent activity grows (measured: -8 pts top-1)
 grad_checkpoint: false         # recompute recurrent steps in backward (halves activation memory)
 
 # ---- logging / evaluation ----

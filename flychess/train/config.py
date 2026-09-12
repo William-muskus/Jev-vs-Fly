@@ -57,7 +57,7 @@ class TrainConfig:
     max_steps: int | None = None               # absolute step cap (also caps the schedule length)
     value_loss_weight: float = 1.0
     grad_clip: float = 1.0
-    amp: bool = True                           # bf16 autocast for the dense parts (SpMM stays fp32)
+    amp: bool = False                           # bf16 autocast for the dense parts (SpMM stays fp32)
     grad_checkpoint: bool = False              # recompute recurrent steps in backward (less VRAM)
 
     # ---- logging / eval ----

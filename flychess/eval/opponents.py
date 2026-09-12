@@ -143,7 +143,7 @@ class BrainPolicyPlayer:
     """
 
     def __init__(self, model: FlyBrain, device: str | torch.device | None = None, temperature: float = 0.0,
-                 name: str = "fly-policy", seed: int = 0, amp: bool = True) -> None:
+                 name: str = "fly-policy", seed: int = 0, amp: bool = False) -> None:
         self.model = model
         self.device = torch.device(device) if device is not None else next(model.parameters()).device
         self.temperature = float(temperature)
