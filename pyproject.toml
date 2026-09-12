@@ -23,7 +23,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8", "pytest-timeout>=2.3", "ruff>=0.6"]
+dev = ["pytest>=8", "pytest-timeout>=2.3", "ruff>=0.6", "httpx>=0.27"]
 
 [project.scripts]
 fly = "flychess.cli:main"
@@ -38,6 +38,7 @@ packages = ["flychess"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 timeout = 600
+markers = ["slow: needs real data or GPU; run with -m slow"]
 
 [tool.ruff]
 line-length = 110

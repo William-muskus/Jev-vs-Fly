@@ -1,0 +1,817 @@
+// app.js — the party game: landing, loading, board, fly avatar, brain canvas, commentary,
+// result card, leaderboard, party mode, sounds. All chess rules come from chess.js; every fly
+// move comes from the network running in engine/worker.js.
+
+import { Chess } from './vendor/chess.js';
+import { Board } from './board.js';
+
+const $ = (id) => document.getElementById(id);
+const DIFF_LABEL = { larva: 'Larva', fly: 'Fly', superfly: 'Superfly' };
+const LB_KEY = 'flychess.leaderboard.v1';
+const fmtInt = (n) => Number(n).toLocaleString('en-US');
+const fmtMs = (ms) => (ms < 1000 ? `${Math.round(ms)} ms` : `${(ms / 1000).toFixed(1)} s`);
+const plural = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
+const fmtClock = (ms) => { const s = Math.round(ms / 1000); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`; };
+
+// ============================================================================ worker client
+class Brain {
+  constructor() {
+    this.worker = new Worker('./engine/worker.js', { type: 'module' });
+    this.pending = new Map();
+    this.nextId = 1;
+    this.ready = null;
+    this.info = null;
+    this.onProgress = () => {};
+    this.onThinking = () => {};
+    this.worker.onmessage = (ev) => this._onMessage(ev.data);
+    this.worker.onerror = (ev) => { this._fail(new Error(ev.message || 'worker crashed')); };
+  }
+
+  load(baseUrl = 'model/') {
+    this.ready = new Promise((resolve, reject) => { this._resolveReady = resolve; this._rejectReady = reject; });
+    this.worker.postMessage({ type: 'load', baseUrl });
+    return this.ready;
+  }
+
+  _fail(err) {
+    this._rejectReady?.(err);
+    for (const [, p] of this.pending) p.reject(err);
+    this.pending.clear();
+  }
+
+  _onMessage(msg) {
+    if (msg.type === 'progress') { this.onProgress(msg); return; }
+    if (msg.type === 'ready') { this.info = msg; this._resolveReady?.(msg); return; }
+    if (msg.type === 'thinking') { this.onThinking(msg); return; }
+    if (msg.type === 'error') {
+      if (msg.id && this.pending.has(msg.id)) { this.pending.get(msg.id).reject(new Error(msg.message)); this.pending.delete(msg.id); }
+      else this._fail(new Error(msg.message));
+      return;
+    }
+    const p = this.pending.get(msg.id);
+    if (p) { this.pending.delete(msg.id); p.resolve(msg); }
+  }
+
+  _request(payload) {
+    const id = this.nextId++;
+    return new Promise((resolve, reject) => {
+      this.pending.set(id, { resolve, reject });
+      this.worker.postMessage({ ...payload, id });
+    });
+  }
+
+  move(fen, moves, difficulty) { return this._request({ type: 'move', fen, moves, difficulty }); }
+  eval(fen, moves) { return this._request({ type: 'eval', fen, moves }); }
+}
+
+// ============================================================================ sounds (WebAudio, synthesised)
+class Sounds {
+  constructor() { this.enabled = false; this.ctx = null; this.buzz = null; }
+  toggle() { this.enabled = !this.enabled; if (!this.enabled) this.stopBuzz(); return this.enabled; }
+  _ctx() {
+    if (!this.ctx) this.ctx = new (window.AudioContext || window.webkitAudioContext)();
+    if (this.ctx.state === 'suspended') this.ctx.resume();
+    return this.ctx;
+  }
+  click(kind = 'move') {
+    if (!this.enabled) return;
+    const ctx = this._ctx(), t = ctx.currentTime;
+    const len = kind === 'capture' ? 0.09 : 0.045;
+    const buf = ctx.createBuffer(1, Math.ceil(ctx.sampleRate * len), ctx.sampleRate);
+    const d = buf.getChannelData(0);
+    for (let i = 0; i < d.length; i++) d[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / d.length, 3);
+    const src = ctx.createBufferSource(); src.buffer = buf;
+    const f = ctx.createBiquadFilter(); f.type = 'lowpass'; f.frequency.value = kind === 'capture' ? 500 : 1800; f.Q.value = 1.2;
+    const g = ctx.createGain(); g.gain.value = kind === 'capture' ? 0.5 : 0.35;
+    src.connect(f).connect(g).connect(ctx.destination);
+    src.start(t);
+    if (kind === 'capture') { // a little wooden thud underneath
+      const o = ctx.createOscillator(); o.type = 'sine'; o.frequency.setValueAtTime(160, t); o.frequency.exponentialRampToValueAtTime(70, t + 0.09);
+      const og = ctx.createGain(); og.gain.setValueAtTime(0.25, t); og.gain.exponentialRampToValueAtTime(0.001, t + 0.12);
+      o.connect(og).connect(ctx.destination); o.start(t); o.stop(t + 0.13);
+    }
+  }
+  chord(win) {
+    if (!this.enabled) return;
+    const ctx = this._ctx(), t = ctx.currentTime;
+    const notes = win ? [440, 554, 659] : [330, 311, 262];
+    notes.forEach((fq, i) => {
+      const o = ctx.createOscillator(); o.type = 'triangle'; o.frequency.value = fq;
+      const g = ctx.createGain(); g.gain.setValueAtTime(0.0001, t + i * 0.12); g.gain.exponentialRampToValueAtTime(0.12, t + i * 0.12 + 0.02); g.gain.exponentialRampToValueAtTime(0.0001, t + i * 0.12 + 0.6);
+      o.connect(g).connect(ctx.destination); o.start(t + i * 0.12); o.stop(t + i * 0.12 + 0.65);
+    });
+  }
+  startBuzz() {
+    if (!this.enabled || this.buzz) return;
+    const ctx = this._ctx(), t = ctx.currentTime;
+    const o = ctx.createOscillator(); o.type = 'sawtooth'; o.frequency.value = 175;
+    const o2 = ctx.createOscillator(); o2.type = 'square'; o2.frequency.value = 176.5;
+    const lfo = ctx.createOscillator(); lfo.frequency.value = 24;
+    const lg = ctx.createGain(); lg.gain.value = 0.012;
+    const f = ctx.createBiquadFilter(); f.type = 'lowpass'; f.frequency.value = 700;
+    const g = ctx.createGain(); g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(0.03, t + 0.25);
+    lfo.connect(lg).connect(g.gain);
+    o.connect(f); o2.connect(f); f.connect(g).connect(ctx.destination);
+    o.start(); o2.start(); lfo.start();
+    this.buzz = { o, o2, lfo, g };
+  }
+  stopBuzz() {
+    const b = this.buzz; if (!b) return; this.buzz = null;
+    const t = this.ctx.currentTime;
+    b.g.gain.cancelScheduledValues(t); b.g.gain.setValueAtTime(b.g.gain.value, t); b.g.gain.exponentialRampToValueAtTime(0.0001, t + 0.2);
+    setTimeout(() => { b.o.stop(); b.o2.stop(); b.lfo.stop(); }, 260);
+  }
+}
+
+// ============================================================================ brain canvas
+const CLASS_COLORS = {
+  optic: [86, 196, 150], central: [233, 166, 58], sensory: [139, 224, 90], visual_projection: [96, 210, 220],
+  visual_centrifugal: [120, 170, 240], ascending: [255, 203, 107], descending: [255, 120, 70], motor: [255, 80, 70],
+  sensory_ascending: [190, 240, 120], endocrine: [240, 130, 200], unknown: [150, 150, 150],
+};
+class BrainCanvas {
+  constructor(canvas) {
+    this.canvas = canvas;
+    this.ctx = canvas.getContext('2d');
+    this.sample = null; this.silhouette = null; this.legend = [];
+    this.values = null; this.target = null; this.from = null; this.tStart = 0;
+    this.pulse = 0; this.thinking = false;
+    this.sprites = {};
+    this.raf = 0;
+    this.bounds = null;
+    new ResizeObserver(() => this._resize()).observe(canvas);
+    this._resize();
+  }
+
+  setData(sample, silhouette, legend) {
+    this.sample = sample; this.silhouette = silhouette; this.legend = legend || [];
+    const xs = silhouette.xy;
+    let minX = 1, maxX = 0, minY = 1, maxY = 0;
+    for (let i = 0; i < xs.length; i += 2) { minX = Math.min(minX, xs[i]); maxX = Math.max(maxX, xs[i]); minY = Math.min(minY, xs[i + 1]); maxY = Math.max(maxY, xs[i + 1]); }
+    this.bounds = { minX, maxX: Math.max(maxX, minX + 1e-3), minY, maxY: Math.max(maxY, minY + 1e-3) };
+    this.values = new Float32Array(sample.idx.length);
+    this.target = new Float32Array(sample.idx.length);
+    this._draw();
+  }
+
+  colorOf(cls) {
+    const name = this.legend[cls] || 'unknown';
+    return CLASS_COLORS[name] || CLASS_COLORS.unknown;
+  }
+
+  /** New activity sample from the network: animate towards it. */
+  setActivity(values) {
+    if (!this.sample || !values) return;
+    // normalise: log-compress and scale by a robust maximum
+    const v = new Float32Array(values.length);
+    let max = 0;
+    for (let i = 0; i < v.length; i++) { v[i] = Math.log1p(Math.abs(values[i])); if (v[i] > max) max = v[i]; }
+    const sorted = Float32Array.from(v).sort();
+    const p97 = sorted[Math.floor(sorted.length * 0.97)] || max || 1;
+    for (let i = 0; i < v.length; i++) v[i] = Math.min(1, v[i] / p97);
+    this.from = Float32Array.from(this.values);
+    this.target = v; this.tStart = performance.now();
+    this._loop();
+  }
+
+  setThinking(on) { this.thinking = on; if (on) this._loop(); }
+
+  _resize() {
+    const dpr = Math.min(devicePixelRatio || 1, 2);
+    const w = this.canvas.clientWidth, h = this.canvas.clientHeight;
+    if (!w || !h) return;
+    this.canvas.width = Math.round(w * dpr); this.canvas.height = Math.round(h * dpr);
+    this.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    this.w = w; this.h = h;
+    this._draw();
+  }
+
+  _sprite(cls) {
+    if (this.sprites[cls]) return this.sprites[cls];
+    const [r, g, b] = this.colorOf(cls);
+    const c = document.createElement('canvas'); c.width = c.height = 32;
+    const x = c.getContext('2d');
+    const grad = x.createRadialGradient(16, 16, 0, 16, 16, 16);
+    grad.addColorStop(0, `rgba(${r},${g},${b},1)`); grad.addColorStop(0.25, `rgba(${r},${g},${b},.7)`); grad.addColorStop(1, `rgba(${r},${g},${b},0)`);
+    x.fillStyle = grad; x.fillRect(0, 0, 32, 32);
+    this.sprites[cls] = c;
+    return c;
+  }
+
+  _project(x, y) {
+    const b = this.bounds, pad = 10;
+    const sx = (this.w - 2 * pad) / (b.maxX - b.minX), sy = (this.h - 2 * pad) / (b.maxY - b.minY);
+    const s = Math.min(sx, sy);
+    const ox = (this.w - s * (b.maxX - b.minX)) / 2, oy = (this.h - s * (b.maxY - b.minY)) / 2;
+    return [ox + (x - b.minX) * s, oy + (y - b.minY) * s];
+  }
+
+  _loop() {
+    if (this.raf) return;
+    const step = () => {
+      this.raf = 0;
+      const t = performance.now();
+      const k = Math.min(1, (t - this.tStart) / 500);
+      if (this.from && this.target) for (let i = 0; i < this.values.length; i++) this.values[i] = this.from[i] + (this.target[i] - this.from[i]) * k;
+      this.pulse = this.thinking ? 0.5 + 0.5 * Math.sin(t / 130) : Math.max(0, this.pulse - 0.05);
+      this._draw(t);
+      if (this.thinking || k < 1 || this.pulse > 0) this.raf = requestAnimationFrame(step);
+    };
+    this.raf = requestAnimationFrame(step);
+  }
+
+  _draw(t = performance.now()) {
+    const ctx = this.ctx;
+    if (!this.w) return;
+    ctx.clearRect(0, 0, this.w, this.h);
+    if (!this.silhouette) return;
+    // silhouette: the shape of the brain, dim
+    const sil = this.silhouette;
+    for (let i = 0; i < sil.cls.length; i++) {
+      const [r, g, b] = this.colorOf(sil.cls[i]);
+      const [px, py] = this._project(sil.xy[2 * i], sil.xy[2 * i + 1]);
+      ctx.fillStyle = `rgba(${r},${g},${b},.13)`;
+      ctx.fillRect(px, py, 1.2, 1.2);
+    }
+    // sampled neurons glowing with activity
+    const s = this.sample;
+    ctx.globalCompositeOperation = 'lighter';
+    for (let i = 0; i < s.cls.length; i++) {
+      let a = this.values[i];
+      if (this.thinking) a = Math.min(1, a * 0.7 + 0.35 * this.pulse * (0.5 + 0.5 * Math.sin(t / 220 + i * 0.37)));
+      if (a < 0.03) continue;
+      const [px, py] = this._project(s.xy[2 * i], s.xy[2 * i + 1]);
+      const size = 3 + 9 * a;
+      ctx.globalAlpha = 0.25 + 0.75 * a;
+      ctx.drawImage(this._sprite(s.cls[i]), px - size / 2, py - size / 2, size, size);
+    }
+    ctx.globalAlpha = 1;
+    ctx.globalCompositeOperation = 'source-over';
+  }
+}
+
+// ============================================================================ commentary & mood
+const MOUTHS = {
+  thinking: 'M95 73 H105', confident: 'M94 72 Q100 78 106 72', smug: 'M93 73 Q100 77 108 69',
+  nervous: 'M94 75 Q100 70 106 75', panicking: 'M95 71 Q100 82 105 71 Z', curious: 'M94 72 Q100 75 106 72',
+};
+const MOOD_WORDS = {
+  thinking: 'thinking', confident: 'confident', smug: 'smug', nervous: 'nervous', panicking: 'panicking', curious: 'curious',
+};
+function moodFor(value) {
+  if (value > 0.55) return 'smug';
+  if (value > 0.18) return 'confident';
+  if (value < -0.55) return 'panicking';
+  if (value < -0.18) return 'nervous';
+  return 'curious';
+}
+const pick = (arr) => arr[Math.floor(Math.random() * arr.length)];
+function commentaryFor({ policyTop, value, san, difficulty, sims }) {
+  const top = policyTop?.[0];
+  const second = policyTop?.[1];
+  const pct = top ? Math.round(top.p * 100) : 0;
+  const lines = [];
+  if (top && san && top.san === san) {
+    if (difficulty === 'superfly' && sims) lines.push(pick([`${sims} simulations later, the fly still wants ${san} (${pct}% on instinct).`, `Instinct and search agree: ${san}.`, `The tree search confirmed the fly's gut: ${san}.`]));
+    else if (pct >= 70) lines.push(pick([`The fly is ${pct}% sure about ${san}.`, `${san}, obviously. ${pct}% of the fly agrees.`, `${pct}% of the fly's descending neurons wanted ${san}.`]));
+    else if (pct >= 40) lines.push(pick([`${san} — the fly's favourite at ${pct}%.`, `The fly leans ${san} (${pct}%).`]));
+    else lines.push(pick([`The fly wavered between ${top.san} and ${second?.san || '…'}, then played ${san}.`, `Only ${pct}% sure, the fly plays ${san} anyway.`]));
+  } else if (san && top) {
+    if (difficulty === 'superfly' && sims) lines.push(pick([`Instinct said ${top.san}; after ${sims} simulations the fly prefers ${san}.`, `The tree search talked the fly out of ${top.san}. ${san} it is.`]));
+    else if (difficulty === 'larva') lines.push(pick([`Larva mode: the fly rolled the dice and got ${san}.`, `${san}! The fly wasn't sure either (${pct}% wanted ${top.san}).`]));
+    else lines.push(pick([`The fly liked ${top.san} but its value head vetoed it. ${san} instead.`, `One ply of doubt turned ${top.san} into ${san}.`]));
+  } else if (top) {
+    lines.push(pct >= 60 ? `The fly already likes ${top.san} (${pct}%).` : `The fly is torn between ${top.san} and ${second?.san || '…'}.`);
+  }
+  if (value > 0.55) lines.push(pick(['It smells victory.', 'Rubbing its front legs together.', 'It thinks it is winning. It might be.']));
+  else if (value > 0.18) lines.push(pick(['It feels good about this.', 'Wings relaxed.', 'Quietly confident.']));
+  else if (value < -0.55) lines.push(pick(['The fly senses danger.', 'Panic in the mushroom bodies.', 'Every descending neuron is screaming.']));
+  else if (value < -0.18) lines.push(pick(['The fly is nervous.', 'Antennae twitching.', 'It does not love this position.']));
+  return lines.join(' ');
+}
+
+// ============================================================================ leaderboard
+function loadBoard() { try { return JSON.parse(localStorage.getItem(LB_KEY) || '[]'); } catch { return []; } }
+function saveBoard(rows) { try { localStorage.setItem(LB_KEY, JSON.stringify(rows.slice(0, 200))); } catch { /* ignore */ } }
+function rankRows(rows) {
+  const order = { win: 0, draw: 1, loss: 2 };
+  return [...rows].sort((a, b) => (order[a.result] - order[b.result]) || (a.moves - b.moves) || (a.timeMs - b.timeMs));
+}
+
+// ============================================================================ app
+class App {
+  constructor() {
+    this.brain = new Brain();
+    this.sounds = new Sounds();
+    this.chess = new Chess();
+    this.board = null;
+    this.viz = new BrainCanvas($('brain-canvas'));
+    this.flySvg = '';
+    this.state = null;
+    this.party = null;
+    this.pendingMoveId = 0;
+    this._bindUI();
+    this._loadFly();
+    this._startLoading();
+  }
+
+  // ---------------------------------------------------------------- boot
+  async _loadFly() {
+    try {
+      this.flySvg = await (await fetch('assets/fly.svg')).text();
+      for (const id of ['hero-fly', 'avatar']) $(id).innerHTML = this.flySvg;
+      $('brand').querySelector('.brand-fly').innerHTML = this.flySvg;
+    } catch { /* decorative */ }
+  }
+
+  _startLoading() {
+    const fill = $('bar-fill'), bytes = $('load-bytes'), neurons = $('load-neurons').querySelector('b');
+    let n = 0, shown = 0, tick = 0;
+    const animateCount = () => {
+      const goal = n * Math.min(1, this._loadFrac || 0);
+      if (Math.abs(goal - shown) > 1) { shown += (goal - shown) * 0.2; neurons.textContent = fmtInt(Math.round(shown)); tick = requestAnimationFrame(animateCount); } else tick = 0;
+    };
+    this.brain.onProgress = (m) => {
+      if (m.n) n = m.n;
+      if (m.phase === 'header') { $('spec-name').textContent = m.runName || 'brain'; bytes.textContent = 'fetching synapses…'; return; }
+      const frac = m.total ? m.loaded / m.total : (m.phase === 'decode' ? 1 : 0);
+      this._loadFrac = frac;
+      fill.style.width = `${Math.round(frac * 100)}%`;
+      bytes.textContent = m.phase === 'decode' ? 'wiring synapses…' : m.total ? `${(m.loaded / 1e6).toFixed(1)} MB / ${(m.total / 1e6).toFixed(1)} MB` : `${(m.loaded / 1e6).toFixed(1)} MB`;
+      if (!tick) tick = requestAnimationFrame(animateCount);
+    };
+    this.brain.load(new URL('model/', location.href).href).then((info) => {
+      const h = info.header;
+      this._loadFrac = 1; fill.style.width = '100%';
+      neurons.textContent = fmtInt(h.n);
+      bytes.textContent = info.fromCache ? 'from cache' : `${(info.bytes / 1e6).toFixed(1)} MB decoded`;
+      $('spec-name').textContent = h.run_name || 'brain';
+      $('spec-neurons').textContent = fmtInt(h.n); $('spec-synapses').textContent = fmtInt(h.nnz);
+      $('lede-neurons').textContent = fmtInt(h.n); $('lede-synapses').textContent = `${(h.nnz / 1e6).toFixed(2)} million`;
+      this.viz.setData(info.sample, info.silhouette, info.legend);
+      this._renderLegend(info);
+      $('brain-caption').textContent = `${fmtInt(info.sample.idx.length)} of ${fmtInt(h.n)} neurons · real connectome positions`;
+      $('btn-start').disabled = false;
+      $('btn-start').querySelector('.btn-start-label').textContent = 'Play the fly';
+      $('loading').hidden = true;
+    }).catch((err) => {
+      const el = $('load-error');
+      el.hidden = false;
+      el.innerHTML = `The fly brain could not be loaded (${escapeHtml(err.message)}). The model files live in <code>web/model/</code>; export them with <code>fly export-web --run &lt;name&gt;</code>, then serve the site (<code>scripts/serve-web.sh</code>).`;
+      $('btn-start').querySelector('.btn-start-label').textContent = 'No fly brain found';
+    });
+  }
+
+  _renderLegend(info) {
+    const counts = {};
+    for (const c of info.silhouette.cls) counts[c] = (counts[c] || 0) + 1;
+    const el = $('legend');
+    el.innerHTML = '';
+    Object.entries(counts).sort((a, b) => b[1] - a[1]).forEach(([cls]) => {
+      const name = info.legend[cls] || `class ${cls}`;
+      const [r, g, b] = this.viz.colorOf(+cls);
+      const span = document.createElement('span');
+      span.style.setProperty('--c', `rgb(${r},${g},${b})`);
+      span.textContent = name.replace(/_/g, ' ');
+      el.appendChild(span);
+    });
+  }
+
+  // ---------------------------------------------------------------- ui wiring
+  _bindUI() {
+    $('btn-start').addEventListener('click', () => this.newGame({
+      difficulty: document.querySelector('input[name=difficulty]:checked').value,
+      color: document.querySelector('input[name=color]:checked').value,
+      name: $('player-name').value.trim() || 'Human',
+    }));
+    $('brand').addEventListener('click', (e) => { e.preventDefault(); this.showLanding(); });
+    $('btn-new').addEventListener('click', () => { if (this.party) this.newGame({ ...this.state.opts, name: this.party.names[this.party.current] }); else this.showLanding(); });
+    $('btn-undo').addEventListener('click', () => this.undo());
+    $('btn-flip').addEventListener('click', () => this.board?.flip());
+    $('btn-resign').addEventListener('click', () => this.resign());
+    $('btn-pgn').addEventListener('click', () => this.copyText(this.pgn(), 'PGN copied'));
+    $('btn-sound').addEventListener('click', () => {
+      const on = this.sounds.toggle();
+      $('btn-sound').setAttribute('aria-pressed', String(on));
+      $('btn-sound').querySelector('.snd-on').hidden = !on; $('btn-sound').querySelector('.snd-off').hidden = on;
+      if (on) this.sounds.click('move');
+    });
+    $('btn-about').addEventListener('click', () => $('about-modal').showModal());
+    $('btn-leaderboard').addEventListener('click', () => { this.renderLeaderboard(); $('leaderboard-modal').showModal(); });
+    $('btn-clear-board').addEventListener('click', () => { saveBoard([]); this.renderLeaderboard(); });
+    $('btn-party').addEventListener('click', () => $('party-modal').showModal());
+    $('btn-party-start').addEventListener('click', () => this.startParty());
+    $('btn-rematch').addEventListener('click', () => { $('result-modal').close(); this.newGame({ ...this.state.opts }); });
+    $('btn-next-player').addEventListener('click', () => { $('result-modal').close(); this.nextPartyPlayer(); });
+    $('btn-copy-image').addEventListener('click', () => this.copyImage());
+    $('btn-download-image').addEventListener('click', () => this.downloadImage());
+    $('btn-copy-text').addEventListener('click', () => this.copyText(this.shareText(), 'Copied'));
+    document.addEventListener('keydown', (e) => {
+      if (e.target.matches('input, textarea') || !this.state) return;
+      if (e.key === 'f') this.board?.flip();
+      if (e.key === 'z' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); this.undo(); }
+    });
+    this.brain.onThinking = (m) => { $('clk-sims').textContent = `${m.done}/${m.total}`; };
+  }
+
+  showLanding() {
+    $('screen-game').hidden = true; $('screen-landing').hidden = false;
+    this.viz.setThinking(false); this.sounds.stopBuzz();
+    window.scrollTo({ top: 0 });
+  }
+
+  toast(msg) {
+    const t = $('toast'); t.textContent = msg; t.hidden = false;
+    clearTimeout(this._toastT); this._toastT = setTimeout(() => { t.hidden = true; }, 2200);
+  }
+
+  // ---------------------------------------------------------------- game flow
+  newGame(opts) {
+    const color = opts.color === 'random' ? (Math.random() < 0.5 ? 'white' : 'black') : opts.color;
+    this.chess = new Chess();
+    this.state = {
+      opts, human: color === 'white' ? 'w' : 'b', difficulty: opts.difficulty, name: opts.name,
+      moves: [], thinkTotal: 0, lastThink: 0, sims: 0, result: null, started: performance.now(), thinking: false, lastValue: 0,
+    };
+    this.pendingMoveId++;
+    if (!this.board) {
+      this.board = new Board($('board'), { onMove: (f, t, p) => this.humanMove(f, t, p), orientation: color });
+    } else this.board.setOrientation(color);
+    this.board.setPosition(this.chess.fen(), { animate: false });
+    this.board.highlight({ lastMove: null, check: null });
+    $('screen-landing').hidden = true; $('screen-game').hidden = false;
+    $('diff-pill').textContent = DIFF_LABEL[opts.difficulty];
+    $('clk-last').textContent = '—'; $('clk-total').textContent = '0.0 s'; $('clk-sims').textContent = opts.difficulty === 'superfly' ? '0/200' : '—';
+    $('btn-resign').disabled = false;
+    this.renderMoves();
+    this.renderPartyBar();
+    this.setMood('curious', 'The fly is watching the board.');
+    this.setValue(0);
+    this.updateTurn();
+    if (this.chess.turn() !== this.state.human) this.flyMove();
+    else this.brain.eval(this.chess.fen(), []).then((r) => {
+      // the fly's opinion of the start position: value is the mover's (yours), so flip it for the fly
+      if (this.state && this.state.moves.length === 0 && !this.state.thinking) {
+        this.viz.setActivity(r.activitySample); this.setValue(-r.value);
+        this.setMood(moodFor(-r.value), commentaryFor({ policyTop: r.policyTop, value: -r.value }));
+      }
+    }).catch(() => {});
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  }
+
+  updateTurn() {
+    const s = this.state;
+    const humanTurn = this.chess.turn() === s.human && !s.result;
+    this.board.setMovable(humanTurn ? s.human : null);
+    this.board.setLegal(humanTurn ? this.chess.moves({ verbose: true }) : []);
+    const flyName = `the fly (${DIFF_LABEL[s.difficulty]})`;
+    const top = this.board.orientation === 'white' ? 'b' : 'w';
+    const who = (c) => (c === s.human ? `<b>${escapeHtml(s.name)}</b>` : `<b>${flyName}</b>`) + (this.chess.turn() === c && !s.result ? ' <span class="turn">· to move</span>' : '');
+    $('who-top').innerHTML = who(top); $('who-bottom').innerHTML = who(top === 'w' ? 'b' : 'w');
+    const st = $('status');
+    st.classList.toggle('over', !!s.result);
+    if (s.result) st.textContent = s.result.text;
+    else if (this.chess.isCheck()) st.textContent = humanTurn ? 'Check! Your move.' : 'The fly is in check…';
+    else st.textContent = humanTurn ? 'Your move.' : 'The fly is thinking…';
+    $('btn-undo').disabled = !humanTurn || s.moves.length < 2;
+    const inCheck = this.chess.isCheck();
+    this.board.highlight({ check: inCheck ? this.kingSquare(this.chess.turn()) : null });
+  }
+
+  kingSquare(color) {
+    const b = this.chess.board();
+    for (let r = 0; r < 8; r++) for (let f = 0; f < 8; f++) { const p = b[r][f]; if (p && p.type === 'k' && p.color === color) return 'abcdefgh'[f] + (8 - r); }
+    return null;
+  }
+
+  applyMove(mv) {
+    const s = this.state;
+    s.moves.push(mv.from + mv.to + (mv.promotion || ''));
+    this.board.setPosition(this.chess.fen());
+    this.board.highlight({ lastMove: [mv.from, mv.to] });
+    this.sounds.click(mv.captured ? 'capture' : 'move');
+    this.renderMoves();
+    const over = this.checkGameOver();
+    this.updateTurn();
+    return over;
+  }
+
+  humanMove(from, to, promotion) {
+    const s = this.state;
+    if (!s || s.thinking || s.result || this.chess.turn() !== s.human) return;
+    let mv;
+    try { mv = this.chess.move({ from, to, promotion }); } catch { return; }
+    if (!mv) return;
+    if (!this.applyMove(mv)) this.flyMove();
+  }
+
+  async flyMove() {
+    const s = this.state;
+    if (!s || s.result) return;
+    s.thinking = true;
+    const id = ++this.pendingMoveId;
+    this.setMood('thinking', null);
+    this.viz.setThinking(true);
+    this.sounds.startBuzz();
+    $('commentary').classList.add('fade');
+    const fen = this.chess.fen();
+    let r;
+    try {
+      r = await this.brain.move(fen, s.moves.slice(), s.difficulty);
+    } catch (err) {
+      this.toast(`The fly brain failed: ${err.message}`);
+      s.thinking = false; this.viz.setThinking(false); this.sounds.stopBuzz(); return;
+    }
+    if (id !== this.pendingMoveId || this.state !== s) return;   // game was reset meanwhile
+    s.thinking = false;
+    this.viz.setThinking(false);
+    this.sounds.stopBuzz();
+    $('commentary').classList.remove('fade');
+    if (!r.move) { this.checkGameOver(); this.updateTurn(); return; }
+    // a small pause so the fly visibly "decides" even when the network is fast
+    const wait = Math.max(0, 450 - r.thinkMs);
+    if (wait) await new Promise((res) => setTimeout(res, wait));
+    if (id !== this.pendingMoveId) return;
+    const mv = this.chess.move({ from: r.move.slice(0, 2), to: r.move.slice(2, 4), promotion: r.move[4] || undefined });
+    s.lastThink = r.thinkMs; s.thinkTotal += r.thinkMs; s.sims = r.sims; s.lastValue = r.value;
+    $('clk-last').textContent = fmtMs(r.thinkMs); $('clk-total').textContent = fmtMs(s.thinkTotal);
+    $('clk-sims').textContent = s.difficulty === 'superfly' ? `${r.sims}` : (r.sims ? `${r.sims}-ply check` : 'policy only');
+    this.viz.setActivity(r.activitySample);
+    this.setValue(r.value);
+    this.setMood(moodFor(r.value), commentaryFor({ policyTop: r.policyTop, value: r.value, san: mv.san, difficulty: s.difficulty, sims: r.sims }));
+    this.applyMove(mv);
+  }
+
+  undo() {
+    const s = this.state;
+    if (!s || s.thinking || s.result || s.moves.length < 2 || this.chess.turn() !== s.human) return;
+    this.chess.undo(); this.chess.undo();
+    s.moves.length -= 2;
+    this.board.setPosition(this.chess.fen());
+    const last = this.chess.history({ verbose: true }).at(-1);
+    this.board.highlight({ lastMove: last ? [last.from, last.to] : null });
+    this.renderMoves();
+    this.updateTurn();
+    this.setMood('curious', 'The fly pretends that never happened.');
+  }
+
+  resign() {
+    const s = this.state;
+    if (!s || s.result) return;
+    this.pendingMoveId++; s.thinking = false; this.viz.setThinking(false); this.sounds.stopBuzz();
+    this.finish({ outcome: 'loss', reason: 'resignation', text: 'You resigned. The fly wins.' });
+  }
+
+  checkGameOver() {
+    const c = this.chess;
+    if (!c.isGameOver()) return false;
+    const s = this.state;
+    if (c.isCheckmate()) {
+      const winner = c.turn() === 'w' ? 'b' : 'w';
+      const humanWon = winner === s.human;
+      this.finish({ outcome: humanWon ? 'win' : 'loss', reason: 'checkmate', text: humanWon ? 'Checkmate! You beat the fly.' : 'Checkmate. The fly wins.' });
+    } else {
+      const reason = c.isStalemate() ? 'stalemate' : c.isThreefoldRepetition() ? 'threefold repetition' : c.isInsufficientMaterial() ? 'insufficient material' : 'fifty-move rule';
+      this.finish({ outcome: 'draw', reason, text: `Draw by ${reason}.` });
+    }
+    return true;
+  }
+
+  finish(result) {
+    const s = this.state;
+    s.result = result;
+    s.timeMs = performance.now() - s.started;
+    s.plies = s.moves.length;
+    s.fullMoves = Math.ceil(s.moves.length / 2);
+    this.board.setMovable(null);
+    this.updateTurn();
+    $('btn-resign').disabled = true;
+    this.sounds.chord(result.outcome === 'win');
+    const mood = result.outcome === 'win' ? 'panicking' : result.outcome === 'loss' ? 'smug' : 'curious';
+    this.setMood(mood, result.outcome === 'win' ? 'The fly has been swatted.' : result.outcome === 'loss' ? 'The fly grooms its wings, victorious.' : 'The fly accepts the draw. Probably.');
+    const row = { name: s.name, result: result.outcome, reason: result.reason, difficulty: s.difficulty, color: s.human, moves: s.fullMoves, plies: s.plies, timeMs: Math.round(s.timeMs), thinkMs: Math.round(s.thinkTotal), date: new Date().toISOString() };
+    saveBoard([row, ...loadBoard()]);
+    if (this.party) { this.party.results[this.party.current] = row; this.renderPartyBar(); }
+    this.showResult(row);
+  }
+
+  // ---------------------------------------------------------------- fly panel
+  setMood(mood, text) {
+    $('avatar-wrap').dataset.mood = mood;
+    $('mood-label').textContent = MOOD_WORDS[mood] || mood;
+    const mouth = $('avatar').querySelector('.mouth');
+    if (mouth) mouth.setAttribute('d', MOUTHS[mood] || MOUTHS.curious);
+    if (text !== null && text !== undefined) $('commentary').textContent = text;
+  }
+
+  setValue(v) {
+    $('value-fill').style.left = `${50 + 50 * Math.max(-1, Math.min(1, v))}%`;
+    $('value-fill').title = `value head: ${v.toFixed(2)}`;
+  }
+
+  // ---------------------------------------------------------------- move list / pgn
+  renderMoves() {
+    const ol = $('moves');
+    const hist = this.chess.history();
+    ol.innerHTML = '';
+    for (let i = 0; i < hist.length; i += 2) {
+      const li = document.createElement('li');
+      const white = this.state.human === 'w' ? '' : ' fly', black = this.state.human === 'b' ? '' : ' fly';
+      li.innerHTML = `<span class="num">${i / 2 + 1}.</span><span class="san${white}${i === hist.length - 1 ? ' cur' : ''}">${hist[i]}</span><span class="san${black}${i + 1 === hist.length - 1 ? ' cur' : ''}">${hist[i + 1] || ''}</span>`;
+      ol.appendChild(li);
+    }
+    ol.scrollTop = ol.scrollHeight;
+  }
+
+  pgn() {
+    const s = this.state;
+    const flyName = `Fruit fly brain (${DIFF_LABEL[s.difficulty]})`;
+    this.chess.setHeader('Event', 'Human vs fruit fly brain');
+    this.chess.setHeader('Site', location.host || 'local');
+    this.chess.setHeader('Date', new Date().toISOString().slice(0, 10).replace(/-/g, '.'));
+    this.chess.setHeader('White', s.human === 'w' ? s.name : flyName);
+    this.chess.setHeader('Black', s.human === 'b' ? s.name : flyName);
+    const res = !s.result ? '*' : s.result.outcome === 'draw' ? '1/2-1/2' : (s.result.outcome === 'win') === (s.human === 'w') ? '1-0' : '0-1';
+    this.chess.setHeader('Result', res);
+    const pgn = this.chess.pgn();
+    return pgn.trimEnd().endsWith(res) ? pgn : `${pgn} ${res}`;
+  }
+
+  // ---------------------------------------------------------------- result / share
+  shareText() {
+    const s = this.state, r = s.result;
+    const head = r.outcome === 'win' ? 'I beat a fruit fly brain at chess' : r.outcome === 'loss' ? 'A fruit fly brain beat me at chess' : 'I drew with a fruit fly brain at chess';
+    return `${head} — ${DIFF_LABEL[s.difficulty]} difficulty, ${plural(s.fullMoves, 'move')}, ${fmtClock(s.timeMs)}. ${location.href.split('#')[0]}`;
+  }
+
+  async showResult(row) {
+    const s = this.state, r = s.result;
+    $('result-eyebrow').textContent = `assay complete · ${DIFF_LABEL[s.difficulty]} · ${r.reason}`;
+    $('result-title').textContent = r.outcome === 'win' ? `${s.name} beat the fly` : r.outcome === 'loss' ? `The fly beat ${s.name}` : `${s.name} drew with the fly`;
+    $('result-sub').textContent = `${plural(s.fullMoves, 'move')} · ${fmtClock(s.timeMs)} · the fly thought for ${fmtMs(s.thinkTotal)} in total`;
+    $('btn-next-player').hidden = !this.party || this.party.current >= this.party.names.length - 1;
+    $('btn-rematch').textContent = this.party ? 'Replay this round' : 'Play again';
+    $('share-hint').textContent = '';
+    await this.drawShareCard(row);
+    $('result-modal').showModal();
+  }
+
+  async drawShareCard() {
+    const canvas = $('share-canvas'), ctx = canvas.getContext('2d');
+    const W = canvas.width, H = canvas.height;
+    const s = this.state, r = s.result;
+    ctx.fillStyle = '#0e100b'; ctx.fillRect(0, 0, W, H);
+    const g = ctx.createRadialGradient(W * 0.85, -50, 20, W * 0.85, -50, 700);
+    g.addColorStop(0, 'rgba(139,224,90,.14)'); g.addColorStop(1, 'rgba(139,224,90,0)');
+    ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+    // brain silhouette top right, final position below it
+    if (this.viz.silhouette) {
+      const sil = this.viz.silhouette, b = this.viz.bounds;
+      const bw = 380, bh = 300, ox = 770, oy = 30;
+      const sc = Math.min(bw / (b.maxX - b.minX), bh / (b.maxY - b.minY));
+      const cx = ox + (bw - sc * (b.maxX - b.minX)) / 2, cy = oy + (bh - sc * (b.maxY - b.minY)) / 2;
+      for (let i = 0; i < sil.cls.length; i++) {
+        const [cr, cg, cb] = this.viz.colorOf(sil.cls[i]);
+        ctx.fillStyle = `rgba(${cr},${cg},${cb},.4)`;
+        ctx.fillRect(cx + (sil.xy[2 * i] - b.minX) * sc, cy + (sil.xy[2 * i + 1] - b.minY) * sc, 2.2, 2.2);
+      }
+    }
+    try { const img = await this.boardImage(); ctx.drawImage(img, 880, 350, 240, 240); } catch { /* ignore */ }
+    if (this.flySvg) {
+      try { const img = await svgToImage(this.flySvg); ctx.drawImage(img, 56, 40, 130, 130); } catch { /* ignore */ }
+    }
+    const MAXW = 640;
+    // draw text shrinking the size (down to 70%) before truncating with an ellipsis
+    const line = (text, x, y, font, color) => {
+      const m = /^(.*?)(\d+(?:\.\d+)?)px(.*)$/.exec(font);
+      let size = +m[2];
+      const setFont = () => { ctx.font = `${m[1]}${size}px${m[3]}`; };
+      setFont(); ctx.fillStyle = color;
+      while (ctx.measureText(text).width > MAXW && size > +m[2] * 0.7) { size -= 1; setFont(); }
+      let t = text;
+      while (t.length > 3 && ctx.measureText(t).width > MAXW) t = t.slice(0, -2).trimEnd() + '…';
+      ctx.fillText(t, x, y);
+    };
+    const mono = 'ui-monospace, Menlo, Consolas, monospace', serif = '"Iowan Old Style", Palatino, Georgia, serif', sans = 'system-ui, sans-serif';
+    line('DROSOPHILA MELANOGASTER · CHESS ASSAY', 210, 88, `600 22px ${mono}`, '#8be05a');
+    const title = r.outcome === 'win' ? 'I beat a fruit fly brain' : r.outcome === 'loss' ? 'A fruit fly brain beat me' : 'I drew with a fruit fly brain';
+    line(title, 210, 160, `italic 64px ${serif}`, '#ece5cf');
+    line('at chess.', 210, 232, `italic 64px ${serif}`, '#ece5cf');
+    line(`${cleanText(s.name)} · ${DIFF_LABEL[s.difficulty]} difficulty · ${s.human === 'w' ? 'white' : 'black'}`, 210, 310, `30px ${sans}`, '#ffcb6b');
+    line(`${plural(s.fullMoves, 'move')} · ${fmtClock(s.timeMs)} · by ${r.reason}`, 210, 356, `26px ${mono}`, '#949a80');
+    const h = this.brain.info?.header || {};
+    line(`${fmtInt(h.n || 0)} neurons · ${fmtInt(h.nnz || 0)} real synapses`, 210, 396, `26px ${mono}`, '#949a80');
+    line('FlyWire connectome · wired like the real fly', 210, 432, `26px ${mono}`, '#949a80');
+    const sans_ = this.chess.history();
+    const movesLine = sans_.map((m, i) => (i % 2 === 0 ? `${i / 2 + 1}.` : '') + m).join(' ');
+    line(movesLine, 210, 500, `22px ${mono}`, '#6b7160');
+    line(location.host ? `${location.host}${location.pathname.replace(/index\.html$/, '')}` : 'flychess', 210, 570, `600 24px ${sans}`, '#e9a63a');
+  }
+
+  boardImage() {
+    const svg = this.board.svg.cloneNode(true);
+    svg.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
+    svg.setAttribute('width', '480'); svg.setAttribute('height', '480');
+    const css = getComputedStyle(document.documentElement);
+    const v = (n) => css.getPropertyValue(n).trim();
+    svg.querySelectorAll('.cb-dots, .cb-promo, .cb-coords').forEach((e) => e.remove());
+    const style = document.createElementNS('http://www.w3.org/2000/svg', 'style');
+    style.textContent = `.cb-light{fill:${v('--sq-light')}}.cb-dark{fill:${v('--sq-dark')}}.cb-last{fill:${v('--hl-last')}}.cb-check{fill:${v('--hl-check')}}.cb-selected{fill:none}
+      .cb-piece{stroke-width:3;stroke-linejoin:round}.cb-w{fill:${v('--piece-w')};stroke:${v('--piece-w-ink')}}.cb-w .ink{fill:${v('--piece-w-ink')};stroke:${v('--piece-w-ink')}}
+      .cb-b{fill:${v('--piece-b')};stroke:${v('--piece-b-ink')}}.cb-b .ink{fill:${v('--piece-b-ink')};stroke:${v('--piece-b-ink')}}.cb-vanish{display:none}`;
+    svg.prepend(style);
+    // inline transforms (CSS transforms on <g> are not serialised)
+    svg.querySelectorAll('.cb-piece').forEach((el) => {
+      const m = /translate\(([-\d.]+)px,\s*([-\d.]+)px\)/.exec(el.style.transform || '');
+      if (m) el.setAttribute('transform', `translate(${m[1]} ${m[2]})`);
+      el.removeAttribute('style');
+    });
+    return svgToImage(new XMLSerializer().serializeToString(svg));
+  }
+
+  async copyImage() {
+    try {
+      const blob = await new Promise((res) => $('share-canvas').toBlob(res, 'image/png'));
+      await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
+      $('share-hint').textContent = 'image copied';
+    } catch (err) {
+      $('share-hint').textContent = `copy failed (${err.name}); try Download`;
+    }
+  }
+
+  async downloadImage() {
+    try {
+      const blob = await new Promise((res) => $('share-canvas').toBlob(res, 'image/png'));
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a'); a.href = url; a.download = `flychess-${this.state.result.outcome}-${Date.now()}.png`;
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 4000);
+      $('share-hint').textContent = 'downloading… (if nothing happens, use Copy image)';
+    } catch (err) { $('share-hint').textContent = `download blocked (${err.name}); use Copy image`; }
+  }
+
+  async copyText(text, msg) {
+    try { await navigator.clipboard.writeText(text); this.toast(msg); }
+    catch { this.toast('Clipboard blocked — select and copy manually'); window.prompt('Copy:', text); }
+  }
+
+  // ---------------------------------------------------------------- leaderboard
+  renderLeaderboard() {
+    const rows = rankRows(loadBoard());
+    const t = $('leaderboard-table');
+    if (!rows.length) { t.innerHTML = '<tr><td class="empty">No games yet. Beat the fly and come back.</td></tr>'; return; }
+    t.innerHTML = '<tr><th>#</th><th>player</th><th>result</th><th>vs</th><th>moves</th><th>time</th><th>date</th></tr>' + rows.slice(0, 50).map((r, i) => `<tr><td>${i + 1}</td><td>${escapeHtml(r.name)}</td><td class="${r.result}">${r.result}</td><td>${DIFF_LABEL[r.difficulty] || r.difficulty}</td><td>${r.moves}</td><td>${fmtClock(r.timeMs)}</td><td>${r.date.slice(0, 10)}</td></tr>`).join('');
+  }
+
+  // ---------------------------------------------------------------- party mode
+  startParty() {
+    const names = $('party-names').value.split('\n').map((s) => s.trim()).filter(Boolean).slice(0, 32);
+    if (names.length < 2) { this.toast('Enter at least two names'); return; }
+    $('party-modal').close();
+    this.party = { names, current: 0, results: [], difficulty: $('party-difficulty').value, color: $('party-color').value };
+    this.newGame({ difficulty: this.party.difficulty, color: this.party.color, name: names[0] });
+  }
+
+  nextPartyPlayer() {
+    const p = this.party;
+    if (!p) return;
+    p.current = Math.min(p.current + 1, p.names.length - 1);
+    this.newGame({ difficulty: p.difficulty, color: p.color, name: p.names[p.current] });
+  }
+
+  renderPartyBar() {
+    const el = $('party-bar'), p = this.party;
+    if (!p) { el.hidden = true; return; }
+    el.hidden = false;
+    const ranked = rankRows(p.results.filter(Boolean));
+    const leader = ranked[0];
+    const done = p.results.filter(Boolean).length;
+    const rows = p.names.map((n, i) => {
+      const r = p.results[i];
+      const cls = i === p.current && !r ? 'now' : r ? 'done' : '';
+      const lead = leader && r === leader && r.result === 'win' ? ' lead' : '';
+      const res = r ? `${r.result === 'win' ? 'beat the fly' : r.result === 'loss' ? 'lost' : 'drew'} · ${r.moves} mv · ${fmtClock(r.timeMs)}` : i === p.current ? 'playing…' : 'waiting';
+      return `<li class="${cls}${lead}"><span>${i + 1}. ${escapeHtml(n)}</span><span class="res">${res}</span></li>`;
+    });
+    const champ = done === p.names.length ? (leader && leader.result === 'win' ? `${escapeHtml(leader.name)} beat the fly fastest.` : 'Nobody beat the fly. The fly wins the party.') : `${done}/${p.names.length} played`;
+    el.innerHTML = `<h3>Party · ${champ}</h3><ol>${rows.join('')}</ol>`;
+    if (done === p.names.length) el.innerHTML += `<div class="row"><button class="btn btn-ghost" id="btn-party-end" type="button">End party</button></div>`;
+    $('btn-party-end')?.addEventListener('click', () => { this.party = null; this.renderPartyBar(); });
+  }
+}
+
+// ============================================================================ helpers
+function escapeHtml(s) { return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
+function cleanText(s) { return String(s).replace(/[\u0000-\u001f]/g, ''); }
+function svgToImage(svgText) {
+  return new Promise((resolve, reject) => {
+    const blob = new Blob([svgText], { type: 'image/svg+xml;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const img = new Image();
+    img.onload = () => { URL.revokeObjectURL(url); resolve(img); };
+    img.onerror = (e) => { URL.revokeObjectURL(url); reject(e); };
+    img.src = url;
+  });
+}
+
+window.flychess = new App();

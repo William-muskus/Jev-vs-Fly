@@ -6,10 +6,17 @@ the dataclass, its (de)serialisation and validation live here so that every modu
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field, asdict
+import time
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
+
+from flychess import paths
+
+if TYPE_CHECKING:  # load.py imports pandas; keep graph.py importable without it
+    from flychess.connectome.load import Connectome
 
 # Dale's law in the fly CNS: acetylcholine excitatory, GABA and glutamate (GluCl) inhibitory,
 # monoamines treated as excitatory/modulatory. Unknown transmitter -> excitatory.
@@ -100,7 +107,7 @@ class BrainGraph:
         return path
 
     @classmethod
-    def load(cls, path: str | Path) -> "BrainGraph":
+    def load(cls, path: str | Path) -> BrainGraph:
         with np.load(Path(path), allow_pickle=False) as z:
             g = cls(
                 n=int(z["root_ids"].shape[0]),
@@ -154,4 +161,164 @@ def toy_graph(n: int = 200, nnz: int = 2000, n_in: int = 16, n_out: int = 16, se
         meta={"toy": True, "seed": seed},
     )
     g.validate()
+    return g
+
+
+# =================================================================================================
+# Building a BrainGraph from the real connectome (docs/SPEC.md §2.3)
+# =================================================================================================
+CENTRAL_EXCLUDED = ("optic", "visual_projection", "visual_centrifugal")
+
+
+def _pick_by_degree(candidates: np.ndarray, degree: np.ndarray, root_ids: np.ndarray, k: int) -> np.ndarray:
+    """Deterministic role selection: sort `candidates` by (degree desc, root_id asc), take the first k."""
+    if len(candidates) == 0:
+        return candidates.astype(np.int32)
+    order = np.lexsort((root_ids[candidates], -degree[candidates].astype(np.int64)))
+    return np.sort(candidates[order[:k]]).astype(np.int32)
+
+
+def edge_signs(pre_nt: np.ndarray, edge_nt: np.ndarray | None = None) -> np.ndarray:
+    """Dale's-law sign per synapse from the PRE-synaptic neuron's transmitter (`NT_SIGN`).
+
+    A neuron without an annotated transmitter falls back to the transmitter predicted for the edge
+    itself (`edge_nt`), and to +1 when neither is known.
+    """
+    nt = np.asarray(pre_nt).astype(str)
+    if edge_nt is not None:
+        edge_nt = np.asarray(edge_nt).astype(str)
+        nt = np.where(nt == "", edge_nt, nt)
+    uniq, inv = np.unique(nt, return_inverse=True)
+    table = np.array([NT_SIGN.get(u, 1) for u in uniq], dtype=np.int8)
+    return table[inv]
+
+
+def build_brain_graph(conn: Connectome, cfg: GraphConfig) -> BrainGraph:
+    """Select the trained subgraph of the connectome and build it in canonical CSR form.
+
+    Pipeline (all steps deterministic):
+      1. region filter on neurons (`central` drops the optic-lobe super classes);
+      2. keep synapses with `syn_count >= min_syn` between kept neurons, drop self-loops;
+      3. inputs  = top `max_inputs`  neurons of `input_super_classes`  by (out-degree desc, root_id);
+         outputs = top `max_outputs` neurons of `output_super_classes` by (in-degree desc, root_id);
+         (degree = number of distinct partners on the filtered edge set; a neuron in both lists is an
+         input first and is removed from the output candidates);
+      4. if `max_neurons`: keep inputs ∪ outputs plus the highest-ranked other neurons by
+         (total synapse count in+out desc, root_id) so that n <= max_neurons;
+      5. drop neurons that end up with zero degree, except inputs/outputs;
+      6. rows = POST-synaptic neuron, columns sorted, i.e. entries ordered by (post, pre).
+    Sign comes from the PRE-synaptic neuron's transmitter (`edge_signs`), never learned.
+    """
+    from flychess.connectome.load import Connectome  # local import: load.py depends on pandas
+
+    assert isinstance(conn, Connectome)
+    t0 = time.time()
+    if cfg.region not in ("full", "central"):
+        raise ValueError(f"unknown region {cfg.region!r} (expected 'full' or 'central')")
+    N = conn.n
+    keep_neuron = np.ones(N, dtype=bool)
+    if cfg.region == "central":
+        keep_neuron &= ~np.isin(conn.super_class, CENTRAL_EXCLUDED)
+
+    # 2. edge filter
+    pre, post, syn = conn.pre, conn.post, conn.syn_count
+    e_keep = (syn >= cfg.min_syn) & keep_neuron[pre] & keep_neuron[post] & (pre != post)
+    pre, post, syn = pre[e_keep], post[e_keep], syn[e_keep]
+    edge_nt = conn.edge_nt_type[e_keep] if conn.edge_nt_type is not None else None
+
+    # 3. roles
+    out_deg = np.bincount(pre, minlength=N)
+    in_deg = np.bincount(post, minlength=N)
+    in_cand = np.flatnonzero(keep_neuron & np.isin(conn.super_class, cfg.input_super_classes))
+    input_glob = _pick_by_degree(in_cand, out_deg, conn.root_ids, cfg.max_inputs)
+    out_cand = np.flatnonzero(keep_neuron & np.isin(conn.super_class, cfg.output_super_classes))
+    out_cand = out_cand[~np.isin(out_cand, input_glob)]
+    output_glob = _pick_by_degree(out_cand, in_deg, conn.root_ids, cfg.max_outputs)
+    role = np.zeros(N, dtype=bool)
+    role[input_glob] = True
+    role[output_glob] = True
+
+    # 4. top-k by total synapse count
+    if cfg.max_neurons is not None:
+        total_syn = np.bincount(pre, weights=syn, minlength=N) + np.bincount(post, weights=syn, minlength=N)
+        others = np.flatnonzero(keep_neuron & ~role)
+        budget = max(cfg.max_neurons - int(role.sum()), 0)
+        order = np.lexsort((conn.root_ids[others], -total_syn[others]))
+        keep_neuron = role.copy()
+        keep_neuron[others[order[:budget]]] = True
+        e_keep = keep_neuron[pre] & keep_neuron[post]
+        pre, post, syn = pre[e_keep], post[e_keep], syn[e_keep]
+        edge_nt = edge_nt[e_keep] if edge_nt is not None else None
+
+    # 5. zero-degree removal (roles exempt)
+    deg = np.bincount(pre, minlength=N) + np.bincount(post, minlength=N)
+    keep_neuron &= (deg > 0) | role
+    kept = np.flatnonzero(keep_neuron)
+    n = len(kept)
+    new_index = np.full(N, -1, dtype=np.int64)
+    new_index[kept] = np.arange(n)
+
+    # 6. canonical CSR (rows = post, columns = pre, sorted by (post, pre))
+    pre_n, post_n = new_index[pre], new_index[post]
+    order = np.lexsort((pre_n, post_n))
+    pre_n, post_n, syn = pre_n[order], post_n[order], syn[order]
+    edge_nt = edge_nt[order] if edge_nt is not None else None
+    indptr = np.zeros(n + 1, dtype=np.int64)
+    np.cumsum(np.bincount(post_n, minlength=n), out=indptr[1:])
+    sign = edge_signs(conn.nt_type[kept][pre_n], edge_nt)
+
+    classes, counts = np.unique(conn.super_class[kept], return_counts=True)
+    meta = {
+        "cfg": cfg.to_dict(),
+        "n": int(n),
+        "nnz": len(pre_n),
+        "n_in": len(input_glob),
+        "n_out": len(output_glob),
+        "super_class_counts": {str(c or ""): int(k) for c, k in zip(classes, counts)},
+        "sign_counts": {"excitatory": int((sign > 0).sum()), "inhibitory": int((sign < 0).sum())},
+        "total_syn_count": float(syn.sum()),
+        "connectome": {"neurons": int(N), "edges": int(conn.n_edges)},
+        "sources": dict(conn.sources),
+        "build_time_s": round(time.time() - t0, 3),
+        "built_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+    }
+    g = BrainGraph(
+        n=n,
+        root_ids=conn.root_ids[kept].astype(np.int64),
+        csr_indptr=indptr.astype(np.int32),
+        csr_indices=pre_n.astype(np.int32),
+        syn_count=syn.astype(np.float32),
+        sign=sign.astype(np.int8),
+        input_idx=new_index[input_glob].astype(np.int32),
+        output_idx=new_index[output_glob].astype(np.int32),
+        super_class=conn.super_class[kept].astype(str),
+        position=conn.position[kept].astype(np.float32),
+        meta=meta,
+    )
+    g.validate()
+    return g
+
+
+def graph_path(cfg: GraphConfig) -> Path:
+    return paths.BRAIN_DIR / f"{cfg.name}.npz"
+
+
+def load_or_build(cfg: GraphConfig, out_path: str | Path | None = None, conn: Connectome | None = None,
+                  verbose: bool = True) -> BrainGraph:
+    """Return the BrainGraph for `cfg`, loading `data/brain/<cfg.name>.npz` when it exists.
+
+    Otherwise the connectome is loaded (`load_connectome`, or the given `conn`), the graph is built,
+    saved to `out_path` (default `data/brain/<cfg.name>.npz`) and returned.
+    """
+    path = Path(out_path) if out_path is not None else graph_path(cfg)
+    if path.exists():
+        return BrainGraph.load(path)
+    if conn is None:
+        from flychess.connectome.load import load_connectome
+
+        conn = load_connectome(verbose=verbose)
+    g = build_brain_graph(conn, cfg)
+    g.save(path)
+    if verbose:
+        print(f"built {g.summary()} in {g.meta['build_time_s']}s -> {path}")
     return g
