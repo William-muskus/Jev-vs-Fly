@@ -16,6 +16,7 @@ vendor/chess.js                   chess.js 1.4.0 (BSD-2)                        
 assets/fly.svg                    the fly (own artwork; pieces are drawn in board.js)
 model/                            gitignored: brain.json + brain.flyb + brain.flyb.gz from `fly export-web`
 test/flybrain.test.mjs            node --test: forward vs. reference, loader layout, MCTS on a stub brain
+test/parity.test.mjs              node --test: JS engine == Python reference on the exported brain (SPEC §8)
 ```
 
 ## Run locally
@@ -61,7 +62,7 @@ for f in web/*.js web/engine/*.js; do node --check "$f"; done
 The test builds a tiny random brain as a real `.flyb` blob, parses it with the loader and checks
 `FlyBrain.forward` against a float64 reference for relu/tanh/gelu, linear and MLP value heads,
 then runs MCTS with a constant-policy stub brain on chess.js (mate-in-one must be found).
-Cross-language parity with Python lives in `test/parity.test.mjs` (other module) using `tests/vectors/`.
+Cross-language parity with Python: `node --test web/test/parity.test.mjs` loads `web/model/` with the loader and checks every logit / value against `tests/vectors/model.json` (written by `fly export-web` from the same blob); it skips when either file is missing.
 
 ## Performance
 

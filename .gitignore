@@ -11,3 +11,4 @@ web/node_modules/
 node_modules/
 *.log
 .DS_Store
+tests/vectors/model.json

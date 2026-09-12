@@ -1,0 +1,223 @@
+"""TrainConfig: every knob of a training run (docs/SPEC.md §6), yaml round-trippable.
+
+The brain hyper-parameters live in the nested ``brain`` dict (the fields of
+:class:`~flychess.model.config.BrainConfig` minus ``graph_path``, which is derived from ``graph``);
+``brain_config()`` turns it into a :class:`BrainConfig`.  ``graph`` is either a name under
+``data/brain/`` (``'full'`` → ``data/brain/full.npz``) or a path to an npz written by ``BrainGraph.save``.
+"""
+from __future__ import annotations
+
+import copy
+from dataclasses import asdict, dataclass, field, fields
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+from flychess import paths
+from flychess.model.config import BrainConfig
+
+STAGES = ("imitation", "selfplay", "all")
+
+
+def _default_device() -> str:
+    try:
+        import torch
+
+        return "cuda" if torch.cuda.is_available() else "cpu"
+    except (ImportError, RuntimeError):  # pragma: no cover - torch missing / broken
+        return "cpu"
+
+
+def _default_brain() -> dict[str, Any]:
+    d = BrainConfig().to_dict()
+    d.pop("graph_path")
+    return d
+
+
+@dataclass
+class TrainConfig:
+    """Configuration of one run. Field docs follow the shared contract; see also ``configs/*.yaml``."""
+
+    run: str = "fly1"
+    graph: str = "full"                        # name under data/brain/ (without .npz) or a path
+    brain: dict[str, Any] = field(default_factory=_default_brain)   # BrainConfig fields (no graph_path)
+
+    # ---- data ----
+    shards_dir: str = str(paths.SHARDS_DIR)
+    shard_name: str | None = None              # only shards '<shard_name>-*.npz'; None = every shard
+    val_fraction: float = 0.02
+
+    # ---- imitation optimisation ----
+    batch_size: int = 256
+    lr: float = 1e-3
+    weight_decay: float = 1e-4
+    warmup_steps: int = 500
+    epochs: int = 1
+    max_steps: int | None = None               # absolute step cap (also caps the schedule length)
+    value_loss_weight: float = 1.0
+    grad_clip: float = 1.0
+    amp: bool = True                           # bf16 autocast for the dense parts (SpMM stays fp32)
+    grad_checkpoint: bool = False              # recompute recurrent steps in backward (less VRAM)
+
+    # ---- logging / eval ----
+    log_every: int = 20                        # these three must be >= 1
+    eval_every: int = 1000
+    eval_batches: int = 50
+    checkpoint_every: int = 2000
+    elo_every: int = 5000                      # 0 disables the quick Elo during imitation
+    elo_games: int = 20
+    num_workers: int = 6
+    seed: int = 0
+    device: str = field(default_factory=_default_device)
+
+    # ---- self-play ----
+    selfplay_iters: int = 50
+    selfplay_games_per_iter: int = 64
+    mcts_sims: int = 64
+    c_puct: float = 1.5
+    temperature_plies: int = 30
+    dirichlet_alpha: float = 0.3
+    dirichlet_eps: float = 0.25
+    replay_buffer_size: int = 200_000
+    selfplay_batch_size: int = 256
+    selfplay_train_steps_per_iter: int = 200
+    selfplay_lr: float = 2e-4
+    max_game_plies: int = 300
+    selfplay_workers: int = 1
+    selfplay_eval_every_iters: int = 5          # Elo vs previous iteration / random every N iterations (and the last)
+
+    def __post_init__(self) -> None:
+        if isinstance(self.brain, BrainConfig):
+            self.brain = self.brain.to_dict()
+        self.brain = {**_default_brain(), **dict(self.brain or {})}  # partial dicts get the defaults
+        self.brain.pop("graph_path", None)
+        # validate the nested brain config early (raises on unknown keys / bad values)
+        BrainConfig.from_dict({**self.brain, "graph_path": ""})
+        if self.batch_size < 1 or self.epochs < 0:
+            raise ValueError("batch_size must be >= 1 and epochs >= 0")
+        if self.max_steps is not None and self.max_steps < 0:
+            raise ValueError("max_steps must be >= 0 or None")
+        if not (0.0 <= self.val_fraction < 1.0):
+            raise ValueError("val_fraction must lie in [0, 1)")
+        for name in ("log_every", "eval_every", "checkpoint_every", "eval_batches", "elo_games", "num_workers",
+                     "warmup_steps", "elo_every", "selfplay_eval_every_iters"):
+            v = getattr(self, name)
+            floor = 0 if name in ("num_workers", "warmup_steps", "elo_every") else 1
+            if not isinstance(v, int) or isinstance(v, bool) or v < floor:
+                raise ValueError(f"{name} must be an int >= {floor}, got {v!r}"
+                                 + (" (elo_every=0 disables the quick Elo)" if name == "elo_every" else ""))
+        if self.lr <= 0 or self.selfplay_lr <= 0 or self.weight_decay < 0 or self.grad_clip < 0:
+            raise ValueError("lr and selfplay_lr must be > 0; weight_decay and grad_clip >= 0")
+        sd = Path(self.shards_dir).expanduser()
+        if not sd.is_absolute():  # relative paths in yaml: relative to the cwd if present there, else FLYCHESS_HOME
+            sd = sd.resolve() if sd.exists() else paths.HOME / sd
+        self.shards_dir = str(sd)
+        self.graph = str(self.graph)
+
+    # ---- derived ---------------------------------------------------------------------------------
+    def brain_config(self, graph_path: str | Path | None = None) -> BrainConfig:
+        """The :class:`BrainConfig` for this run (``graph_path`` defaults to :func:`resolve_graph_path`)."""
+        gp = str(graph_path) if graph_path is not None else str(resolve_graph_path(self))
+        return BrainConfig.from_dict({**self.brain, "graph_path": gp})
+
+    def run_dir(self) -> Path:
+        return paths.run_dir(self.run)
+
+    # ---- (de)serialisation -----------------------------------------------------------------------
+    def to_dict(self) -> dict[str, Any]:
+        return copy.deepcopy(asdict(self))
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> TrainConfig:
+        d = dict(d or {})
+        known = {f.name for f in fields(cls)}
+        unknown = set(d) - known
+        if unknown:
+            raise KeyError(f"unknown TrainConfig keys: {sorted(unknown)}")
+        return cls(**d)
+
+    def to_yaml(self, path: str | Path) -> Path:
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(yaml.safe_dump(self.to_dict(), sort_keys=False))
+        return path
+
+    @classmethod
+    def from_yaml(cls, path: str | Path) -> TrainConfig:
+        data = yaml.safe_load(Path(path).read_text()) or {}
+        return cls.from_dict(data)
+
+    def replace(self, **overrides: Any) -> TrainConfig:
+        """Copy with overrides. ``brain.steps=4`` (dotted) or ``brain={'steps': 4}`` merge into ``brain``."""
+        d = self.to_dict()
+        for key, value in overrides.items():
+            if value is None and key not in {"max_steps", "shard_name"}:
+                continue  # None means "not given" for every field except the optional ones
+            if key.startswith("brain."):
+                d["brain"][key[len("brain."):]] = value
+            elif key == "brain":
+                d["brain"] = {**d["brain"], **dict(value.to_dict() if isinstance(value, BrainConfig) else value)}
+                d["brain"].pop("graph_path", None)
+            else:
+                d[key] = value
+        return self.from_dict(d)
+
+    # ---- presets ---------------------------------------------------------------------------------
+    @classmethod
+    def tiny(cls, run: str = "tiny", **overrides: Any) -> TrainConfig:
+        """Smoke-test preset: the 2000-neuron ``tiny`` graph, a handful of steps, everything small."""
+        cfg = cls(
+            run=run,
+            graph="tiny",
+            brain={**_default_brain(), "steps": 4, "value_hidden": 32},
+            val_fraction=0.2,
+            batch_size=32,
+            lr=1e-3,
+            warmup_steps=5,
+            epochs=1,
+            max_steps=30,
+            log_every=5,
+            eval_every=10,
+            eval_batches=2,
+            checkpoint_every=20,
+            elo_every=20,
+            elo_games=2,
+            num_workers=0,
+            selfplay_iters=1,
+            selfplay_games_per_iter=2,
+            mcts_sims=4,
+            replay_buffer_size=1000,
+            selfplay_batch_size=16,
+            selfplay_train_steps_per_iter=4,
+            max_game_plies=40,
+            selfplay_eval_every_iters=1,
+        )
+        return cfg.replace(**overrides) if overrides else cfg
+
+
+def resolve_graph_path(cfg: TrainConfig | str) -> Path:
+    """``'full'`` → ``data/brain/full.npz``; an existing path (or anything ending in ``.npz``) is used as is."""
+    name = cfg.graph if isinstance(cfg, TrainConfig) else str(cfg)
+    p = Path(name).expanduser()
+    if p.suffix == ".npz" or p.exists() or "/" in name:
+        if not p.is_absolute() and not p.exists() and (paths.HOME / p).exists():
+            return paths.HOME / p
+        return p
+    return paths.BRAIN_DIR / f"{name}.npz"
+
+
+def load_config(config: TrainConfig | str | Path | dict | None, **overrides: Any) -> TrainConfig:
+    """Normalise ``None`` / yaml path / dict / TrainConfig into a TrainConfig, then apply ``overrides``."""
+    if config is None:
+        cfg = TrainConfig()
+    elif isinstance(config, TrainConfig):
+        cfg = config
+    elif isinstance(config, dict):
+        cfg = TrainConfig.from_dict(config)
+    else:
+        cfg = TrainConfig.from_yaml(config)
+    return cfg.replace(**overrides) if overrides else cfg
+
+
+__all__ = ["STAGES", "TrainConfig", "load_config", "resolve_graph_path"]
