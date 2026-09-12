@@ -193,6 +193,7 @@ def export_web(
         "dale": bool(cfg.dale),
         "n": int(graph.n),
         "nnz": int(graph.nnz),
+        "total_synapses": int(graph.meta.get("total_syn_count") or float(graph.syn_count.sum())),
         "n_in": int(graph.n_in),
         "n_out": int(graph.n_out),
         "num_moves": int(cfg.num_moves),

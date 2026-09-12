@@ -13,7 +13,7 @@
 
 <header class="topbar">
   <a class="brand" href="#" id="brand"><span class="brand-fly" aria-hidden="true"></span><span>fly<em>chess</em></span></a>
-  <div class="specimen mono" id="specimen" title="the network you are playing">specimen <b id="spec-name">—</b> · <span id="spec-neurons">—</span> neurons · <span id="spec-synapses">—</span> synapses</div>
+  <div class="specimen mono" id="specimen" title="the network you are playing">specimen <b id="spec-name">—</b> · <span id="spec-neurons">—</span> neurons · <span id="spec-synapses">—</span> connections</div>
   <nav class="topbar-actions">
     <button class="btn btn-ghost" id="btn-leaderboard" type="button"><span class="full">leaderboard</span><span class="short">scores</span></button>
     <button class="btn btn-ghost" id="btn-party" type="button"><span class="full">party mode</span><span class="short">party</span></button>
@@ -34,11 +34,11 @@
       <p class="lede">
         The player is a recurrent neural network whose neurons and synapses are the
         <a href="https://flywire.ai" rel="noopener">FlyWire</a> connectome of an adult fruit fly:
-        <b id="lede-neurons">~134,000</b> neurons and <b id="lede-synapses">~2.7 million</b> synapses, wired exactly as in the animal.
+        <b id="lede-neurons">~134,000</b> neurons and <b id="lede-synapses">~2.7 million</b> neuron-to-neuron connections (<span id="lede-connections-note">34 million synapses in</span> the wiring diagram), wired exactly as in the animal.
         Only the synaptic strengths were trained. It is not a chess engine. It is a fly.
       </p>
       <ul class="facts mono">
-        <li>every synapse exists in the real fly</li>
+        <li>every connection exists in the real fly (≥ 5 synapses between the pair)</li>
         <li>excitatory / inhibitory signs from real neurotransmitters</li>
         <li>runs entirely in your browser</li>
       </ul>

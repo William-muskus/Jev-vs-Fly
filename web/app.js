@@ -405,6 +405,8 @@ class App {
       bytes.textContent = info.fromCache ? 'from cache' : `${(info.bytes / 1e6).toFixed(1)} MB decoded`;
       $('spec-name').textContent = h.run_name || 'brain';
       $('spec-neurons').textContent = fmtInt(h.n); $('spec-synapses').textContent = fmtInt(h.nnz);
+      const syn = h.total_synapses ? `${(h.total_synapses / 1e6).toFixed(1)} million synapses in` : '';
+      $('lede-connections-note').textContent = syn;
       $('lede-neurons').textContent = fmtInt(h.n); $('lede-synapses').textContent = `${(h.nnz / 1e6).toFixed(2)} million`;
       this.viz.setData(info.sample, info.silhouette, info.legend);
       this._renderLegend(info);
@@ -813,7 +815,7 @@ class App {
     line(`${cleanText(s.name)} · ${DIFF_LABEL[s.difficulty]} difficulty · ${s.human === 'w' ? 'white' : 'black'}`, 210, 310, `30px ${sans}`, '#ffcb6b');
     line(`${plural(s.fullMoves, 'move')} · ${fmtClock(s.timeMs)} · by ${r.reason}`, 210, 356, `26px ${mono}`, '#949a80');
     const h = this.brain.info?.header || {};
-    line(`${fmtInt(h.n || 0)} neurons · ${fmtInt(h.nnz || 0)} real synapses`, 210, 396, `26px ${mono}`, '#949a80');
+    line(`${fmtInt(h.n || 0)} neurons · ${fmtInt(h.nnz || 0)} real connections`, 210, 396, `26px ${mono}`, '#949a80');
     line('FlyWire connectome · wired like the real fly', 210, 432, `26px ${mono}`, '#949a80');
     const sans_ = this.chess.history();
     const movesLine = sans_.map((m, i) => (i % 2 === 0 ? `${i / 2 + 1}.` : '') + m).join(' ');

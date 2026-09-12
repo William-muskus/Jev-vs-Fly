@@ -296,7 +296,7 @@ def build_parser() -> argparse.ArgumentParser:
     # build-brain
     s = sub.add_parser("build-brain", help="turn the connectome into a BrainGraph npz (data/brain/<name>.npz)",
                        description="Select the neurons / synapses that form the network (SPEC §2.3) and save "
-                                   "the CSR graph. Default: the whole brain (~134k neurons, 2.7M synapses).")
+                                   "the CSR graph. Default: the whole brain (~134k neurons, 2.7M connections / 34M synapses).")
     s.add_argument("--region", choices=("full", "central"), default="full")
     s.add_argument("--max-neurons", type=int, default=None, help="keep the top-N neurons by synapse count")
     s.add_argument("--min-syn", type=int, default=5, help="minimum synapses per (pre, post) pair")

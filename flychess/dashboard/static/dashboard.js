@@ -693,7 +693,7 @@
     if (state.run) parts.push(`run ${state.run}`);
     if (info.started_at) parts.push(`started ${new Date(info.started_at * 1000).toLocaleString()}`);
     if (gm.n || gm.neurons) parts.push(`${fmtInt(gm.n || gm.neurons)} neurons`);
-    if (gm.nnz || gm.synapses) parts.push(`${fmtInt(gm.nnz || gm.synapses)} synapses`);
+    if (gm.nnz || gm.synapses) parts.push(`${fmtInt(gm.nnz || gm.synapses)} connections`);
     if (info.graph_path) parts.push(String(info.graph_path).split("/").pop());
     st.runInfo.textContent = parts.join(" · ") || "–";
   }

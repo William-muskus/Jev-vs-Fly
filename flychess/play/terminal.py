@@ -167,7 +167,7 @@ def play_terminal(
 
     console.print(Panel.fit(
         f"[bold]fly-chess[/] — you play [bold]{color}[/] against [bold]{fly_name}[/]\n"
-        f"brain: {engine.model.n:,} neurons · {engine.model.nnz:,} synapses · {engine.model.steps} steps\n"
+        f"brain: {engine.model.n:,} neurons · {engine.model.nnz:,} connections · {engine.model.steps} steps\n"
         "moves in SAN (Nf3) or UCI (g1f3); commands: undo · resign · hint · new · quit · help",
         title="🪰", border_style="green"))
 
