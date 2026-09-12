@@ -76,15 +76,28 @@ fly-chess/
 
 ## 2. Connectome (`flychess/connectome`)
 
-### 2.1 Source files (FlyWire public release, Codex snapshot 783, CC-BY 4.0)
+### 2.1 Source files (FlyWire public release, Codex snapshot 783)
+Public, no-login URLs (verified 2026-09-12): `https://storage.googleapis.com/flywire-data/codex/data/fafb/783/<file>`.
 Downloaded into `data/connectome/`:
-- `connections.csv.gz` — columns `pre_root_id, post_root_id, neuropil, syn_count, nt_type`.
-  One row per (pre, post, neuropil); only pairs with >= 5 synapses. Aggregate over neuropil → (pre, post, syn_count, nt_type).
-- `classification.csv.gz` — `root_id, flow, super_class, class, sub_class, cell_type, hemibrain_type, hemilineage, side, nerve`.
-- `neurons.csv.gz` — `root_id, group, nt_type, nt_type_score, da_avg, ser_avg, gaba_avg, glut_avg, ach_avg, oct_avg, ...`.
-- `cell_stats.csv.gz` or `coordinates.csv.gz` — soma / representative position for visualisation.
-`download.py` tries the URLs in `SOURCES` in order, verifies size, and prints manual instructions
-if all fail (the user can also drop the files in `data/connectome/`). `fly download --connectome`.
+- `connections.csv.gz` (50.3 MB) — columns `pre_root_id, post_root_id, neuropil, syn_count, nt_type`.
+  3,869,878 rows, one per (pre, post, neuropil); aggregate over neuropil → 2,700,513 (pre, post) pairs between
+  134,181 neurons, threshold ≥ 5 synapses per pair already applied (per-row syn_count may be < 5). nt_type per edge
+  ∈ {ACH, GABA, GLUT, DA, SER, OCT}. Sum of syn_count = 34.15 M.
+- `neurons.csv.gz` (1.7 MB) — `root_id, group, nt_type, nt_type_score, da_avg, ser_avg, gaba_avg, glut_avg, ach_avg, oct_avg`; 139,255 rows.
+- `classification.csv.gz` (0.9 MB) — `root_id, flow, super_class, class, sub_class, hemilineage, side, nerve`
+  (NOTE: no cell_type column any more). super_class values & counts: optic 77,873; central 32,381; sensory 16,938;
+  visual_projection 7,684; ascending 1,750; descending 1,305; sensory_ascending 612; visual_centrifugal 522; motor 110; endocrine 80.
+  flow ∈ {intrinsic, afferent, efferent}.
+- `consolidated_cell_types.csv.gz` (0.9 MB) — `root_id, primary_type, additional_type(s)` → use `primary_type` as `cell_type`.
+- `coordinates.csv.gz` — `root_id, position, supervoxel_id` where position is a string `"[x y z]"` in nm, multiple rows
+  per neuron → take the first row per root_id (or the mean).
+- `cell_stats.csv.gz` — `root_id, length_nm, area_nm, size_nm` (optional). `names.csv.gz` — `root_id, name, group` (optional).
+Licensing: the Codex CSV release is CC BY-NC 4.0 per FlyWire guidelines (the Zenodo mirror 10.5281/zenodo.10676866 is
+CC BY 4.0). Cite Dorkenwald et al. 2024 (doi:10.1038/s41586-024-07558-y) and Schlegel et al. 2024
+(doi:10.1038/s41586-024-07686-5). `download.py` downloads with streaming progress, verifies gzip integrity, and
+prints manual instructions if a URL fails (the user can also drop files in `data/connectome/`). `fly download --connectome`.
+The Lichess dumps are CC0 (`https://database.lichess.org/standard/lichess_db_standard_rated_YYYY-MM.pgn.zst`,
+2014-01 = 111 MB / 697k games, 2013-01 = 17.8 MB / 121k games).
 
 ### 2.2 `Connectome` (load.py)
 ```python
@@ -207,8 +220,13 @@ policy_logits = policy_head(h_T[:, output_idx]);  value = tanh(value_head(h_T[:,
 `forward(x: (B,1280)) -> (policy_logits (B,4168), value (B,1), h_T (B,n) optional)`.
 Provide `forward(x, return_activity=True)` for visualisation. Policy loss masks illegal moves with `-inf` before
 cross-entropy. The module must be exportable: `state_dict()` + `BrainConfig` + graph path fully define the network.
-`model/spmm.py` implements the custom autograd function benchmarked at 0.27 s per (B=256, T=8, full brain) step;
-it precomputes the transposed CSR permutation once and computes `dW` in chunks of ≤ 1e6 synapses.
+`model/spmm.py` implements a custom `torch.autograd.Function` (do NOT rely on `torch.sparse_csr_tensor(values_param)`
+autograd: its backward densifies to a 73 GiB matrix). Forward: `torch.mm(csr, h)` with `h: (n, B)`; backward:
+`dvalues = torch.sparse.sampled_addmm(Z, g, h.t()).values()` (SDDMM on the same CSR pattern, `Z` = zeros CSR) and
+`dh = csr_T @ g` using a precomputed transposed CSR (`crow_t, col_t, perm_t` so `values_t = values[perm_t]`).
+Measured on the RTX 5080: 9.6 ms fwd+bwd per timestep at n=140k, nnz=3M, B=256, < 1 GB extra memory.
+`torch.compile` cannot trace sparse tensors — keep SpMM inside the Function; compile only dense parts if at all.
+Internally keep the hidden state as `(n, B)` (neuron-major) for cuSPARSE; expose batch-first at the module boundary.
 
 ## 5. Data (`data/`)
 
@@ -263,7 +281,10 @@ for each array, in this order: `csr_indptr (i32)`, `csr_indices (i32)`, `w (f16,
 (if MLP value head, also `value_w2`, `value_b2`), plus `positions (f16, [n,3])` normalised to [0,1] for the brain visualiser,
 and `super_class (u8, [n])` with a legend in the header. Header also has `steps, activation, n, nnz, n_in, n_out, num_moves,
 num_planes, run_name, train_steps, exported_at, elo_estimates`.
-Offsets are 8-byte aligned. Whole file gzip-friendly. Target size ≤ 40 MB for the full brain.
+Offsets are 8-byte aligned. `csr_indices` is stored as-is (i32) — simplicity over size. Target ≤ 45 MB raw for the full brain;
+`export-web` also writes `brain.flyb.gz` and the loader fetches the `.gz` when present, decoding with `DecompressionStream('gzip')`
+while streaming progress via `response.body.getReader()`, then caches the decoded buffer in the Cache API / IndexedDB.
+Measured in-browser cost: ~4 ms per recurrent timestep for 3M synapses in plain JS → ~35 ms per forward pass at 8 steps.
 JS `FlyBrain.forward(planesFloat32) -> {policy: Float32Array(4168), value: number, activity: Float32Array(n)}` must match
 Python within `1e-2` on logits for the vectors in `tests/vectors/model.json` (`{fen, top5: [[idx, logit]], value}`),
 generated by `export/testvectors.py` from the exported f16 weights (so both sides use identical rounded weights).
