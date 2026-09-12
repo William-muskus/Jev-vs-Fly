@@ -1,6 +1,6 @@
 // worker.js — Web Worker hosting the fly brain. Every move sent back was chosen by the network
 // (SPEC §9): larva = temperature-1.2 sample of the policy, fly = argmax policy with a 1-ply
-// value-head check over the top-3 policy moves, superfly = 200-simulation PUCT MCTS.
+// value-head check over the top-3 policy moves, superfly = 100-simulation PUCT MCTS (≈5 s per move on the full brain in plain JS; Python uses 200).
 //
 // Messages in:  {type:'load', baseUrl}
 //               {type:'move', id, fen, moves:[uci...], difficulty:'larva'|'fly'|'superfly'}
@@ -29,7 +29,7 @@ const SILHOUETTE_N = 6000;
 const DIFFICULTY = {
   larva: { kind: 'sample', temperature: 1.2 },
   fly: { kind: 'lookahead', topN: 3 },
-  superfly: { kind: 'mcts', sims: 200 },
+  superfly: { kind: 'mcts', sims: 100 },
 };
 
 let brain = null;

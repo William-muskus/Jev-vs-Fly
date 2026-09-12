@@ -324,7 +324,7 @@ fly export-web --run NAME [--out web/model] [--quant f16|i8]
 fly test-vectors --run NAME
 ```
 Difficulty: `larva` = sample policy with temperature 1.2 (no search); `fly` = argmax policy + 1-ply value check;
-`superfly` = MCTS 200 simulations. All three use the fly brain exclusively.
+`superfly` = MCTS 200 simulations (the browser worker uses 100 to keep moves ≈5 s). All three use the fly brain exclusively.
 
 ## 10. Dashboard (`dashboard/`)
 

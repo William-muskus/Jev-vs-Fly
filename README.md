@@ -184,7 +184,7 @@ All three use the fly brain exclusively — there is no fallback engine, no rand
 |---|---|---|
 | **larva** | sample the legal-masked policy at temperature 1.2, no search | erratic, beatable |
 | **fly** | argmax of the policy, then a 1-ply check: the top-3 candidates are played and the position the value head likes *least* for the opponent is kept | the fly's honest opinion |
-| **superfly** | PUCT Monte-Carlo tree search, 200 simulations, every leaf evaluated by the brain | the same brain, thinking longer |
+| **superfly** | PUCT Monte-Carlo tree search, 200 simulations (100 in the browser), every leaf evaluated by the brain | the same brain, thinking longer |
 
 The value head also drives the fly's mood in the UIs (smug / confident / focused / nervous / panicking).
 
