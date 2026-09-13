@@ -339,7 +339,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--tiny", action="store_true", help="smoke preset: tiny graph, batch 32, 30 steps, 1 self-play iter")
     s.add_argument("--graph", default=None, help="graph name under data/brain/ or an npz path")
     s.add_argument("--shards-dir", dest="shards_dir", default=None)
-    s.add_argument("--shard-name", dest="shard_name", default=None, help="only shards '<name>-*.npz'")
+    s.add_argument("--shard-name", dest="shard_name", default=None, help="shard series to train on: comma-separated names with optional repeat factors, e.g. 'lichess2014,lichess2015,evals:3'")
     s.add_argument("--batch-size", dest="batch_size", type=int, default=None)
     s.add_argument("--lr", type=float, default=None)
     s.add_argument("--epochs", type=int, default=None)

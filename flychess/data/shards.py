@@ -3,10 +3,14 @@
 A shard ``<name>-NNNNN.npz`` holds ``S`` positions:
     planes: uint8 (S, 20, 8, 8)   planes 0-17 and 19 are 0/1, plane 18 is (min(halfmove,100)*255+50)//100
     move:   int16 (S,)            move index (SPEC §3.3), mover's perspective
-    value:  int8  (S,)            +1 / 0 / -1 from the mover's perspective
-    elo:    int16 (S,)            the mover's Elo
+    value:  int8  (S,)            +1 / 0 / -1 from the mover's perspective (game outcome), or a quantised
+                                  engine evaluation ``round(v * value_scale)`` (``flychess.data.evals``)
+    elo:    int16 (S,)            the mover's Elo (0 when unknown, e.g. engine-evaluated positions)
     ply:    int16 (S,)            0-based ply of the position (number of half-moves played before it)
-``collate`` rescales plane 18 back to [0, 1] and flattens to ``float32 (B, 1280)``.
+    value_scale: scalar, optional 1 when missing (old shards); ``value / value_scale`` is the float target in
+                                  [-1, 1] (eval shards use 127)
+``collate`` rescales plane 18 back to [0, 1], flattens to ``float32 (B, 1280)`` and divides ``value`` by
+``value_scale`` (``float32``).
 
 A build with a game-level hold-out (``build_shards(..., val_every=k)``) writes a second series
 ``<name>.val-NNNNN.npz`` holding every position of one game in ``k``; ``list_shards`` never mixes the two
@@ -30,6 +34,7 @@ from ..chessenv.encoding import FLAT_INPUT, NUM_PLANES
 SHARD_SIZE = 262144
 HALFMOVE_SCALE = 255.0
 SHARD_KEYS = ("planes", "move", "value", "elo", "ply")
+VALUE_SCALE_KEY = "value_scale"   # optional scalar npz key; missing = 1 (old shards store the outcome +1/0/-1)
 VAL_SUFFIX = ".val"   # the game-level validation series of <name> is named <name>.val
 _SHARD_RE = re.compile(r"^(?P<series>.+)-(?P<index>\d{5,})\.npz$")
 
@@ -42,30 +47,46 @@ def shard_path(out_dir: str | Path, name: str, index: int) -> Path:
 
 
 def write_shard(path: str | Path, planes: np.ndarray, move: np.ndarray, value: np.ndarray,
-                elo: np.ndarray, ply: np.ndarray) -> Path:
-    """Write one shard atomically (``np.savez_compressed`` into a temp file, then rename)."""
+                elo: np.ndarray, ply: np.ndarray, value_scale: float = 1.0) -> Path:
+    """Write one shard atomically (``np.savez_compressed`` into a temp file, then rename).
+
+    ``value`` is stored as int8; ``value_scale != 1`` records that the float target is ``value / value_scale``
+    (a scalar ``value_scale`` key is written only then, so outcome shards keep the old five-array layout).
+    """
     path = Path(path)
     n = planes.shape[0]
     assert planes.shape == (n, NUM_PLANES, 8, 8) and planes.dtype == np.uint8, planes.shape
     assert move.shape == (n,) and value.shape == (n,) and elo.shape == (n,) and ply.shape == (n,)
+    if not value_scale > 0:
+        raise ValueError(f"value_scale must be > 0, got {value_scale!r}")
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + f".tmp{os.getpid()}")
+    arrays = {
+        "planes": planes,
+        "move": move.astype(np.int16),
+        "value": value.astype(np.int8),
+        "elo": elo.astype(np.int16),
+        "ply": ply.astype(np.int16),
+    }
+    if value_scale != 1.0:
+        arrays[VALUE_SCALE_KEY] = np.float32(value_scale)
     with open(tmp, "wb") as f:
-        np.savez_compressed(
-            f,
-            planes=planes,
-            move=move.astype(np.int16),
-            value=value.astype(np.int8),
-            elo=elo.astype(np.int16),
-            ply=ply.astype(np.int16),
-        )
+        np.savez_compressed(f, **arrays)
     os.replace(tmp, path)
     return path
 
 
 def read_shard(path: str | Path) -> dict[str, np.ndarray]:
+    """The five arrays of a shard plus ``'value_scale'`` (a python float, 1.0 when the file has none)."""
     with np.load(Path(path), allow_pickle=False) as z:
-        return {k: z[k] for k in SHARD_KEYS}
+        out = {k: z[k] for k in SHARD_KEYS}
+        out[VALUE_SCALE_KEY] = read_value_scale(z)
+        return out
+
+
+def read_value_scale(npz) -> float:
+    """``value_scale`` of an open ``np.load`` handle (1.0 when the key is absent: old outcome shards)."""
+    return float(npz[VALUE_SCALE_KEY]) if VALUE_SCALE_KEY in npz.files else 1.0
 
 
 def val_name(name: str) -> str:
@@ -118,17 +139,72 @@ def count_positions(shard_dir_or_files: str | Path | Sequence[str | Path]) -> in
     return total
 
 
+def parse_shard_names(spec: str | Sequence[str | tuple[str, int]] | None) -> list[tuple[str, int]] | None:
+    """``'lichess2014,lichess2015,evals:3'`` -> ``[('lichess2014', 1), ('lichess2015', 1), ('evals', 3)]``.
+
+    A comma-separated list of shard series names, each with an optional ``:k`` repeat factor (``k >= 1``, an
+    integer: the series' training shards are listed ``k`` times, which oversamples it ``k``-fold; validation
+    shards are never repeated).  Whitespace around names is ignored; ``None`` / ``''`` -> ``None`` (every
+    series).  A list of names / ``(name, repeat)`` pairs is normalised the same way.
+    """
+    if spec is None:
+        return None
+    if isinstance(spec, str):
+        items: list = [x for x in spec.split(",") if x.strip()]
+    else:
+        items = list(spec)
+    if not items:
+        return None
+    out: list[tuple[str, int]] = []
+    for item in items:
+        if isinstance(item, str):
+            name, _, rep = item.strip().partition(":")
+            try:
+                repeat = int(rep) if rep else 1
+            except ValueError:
+                raise ValueError(f"bad repeat factor in shard name {item!r} (expected '<name>:<int>')") from None
+        else:
+            name, repeat = str(item[0]).strip(), int(item[1])
+        if not name:
+            raise ValueError(f"empty shard series name in {spec!r}")
+        if repeat < 1:
+            raise ValueError(f"repeat factor of shard series {name!r} must be >= 1, got {repeat}")
+        out.append((name, repeat))
+    return out
+
+
 def load_split(shard_dir: str | Path, val_fraction: float = 0.05, seed: int = 0,
-               name: str | None = None) -> tuple[list[Path], list[Path]]:
+               name: str | Sequence[str | tuple[str, int]] | None = None) -> tuple[list[Path], list[Path]]:
     """Deterministically split shard files into ``(train_files, val_files)``.
 
-    If the build wrote a game-level hold-out series (``<name>.val-NNNNN.npz``, ``build_shards(val_every=k)``)
-    that series *is* the validation set (``val_fraction`` is ignored) and no validation game has a position in
-    the training shards.  Otherwise the files are sorted, permuted with ``seed`` and the last
-    ``round(val_fraction * n)`` (at least one when ``val_fraction > 0`` and there are >= 2 shards) become
-    the validation set — a *shard*-level split: shards are shuffled at the position level, so positions of
-    the same game then sit in both sets (a warning says so).
+    ``name`` selects the shard series: ``None`` (every series), one series name, or several with repeat
+    factors — a ``'lichess2014,lichess2015,evals:3'`` string (see :func:`parse_shard_names`) or the parsed
+    ``[(name, repeat), ...]`` list.  Each series is split on its own (below) and the training lists are
+    concatenated with a series repeated ``repeat`` times (``ShardDataset`` shuffles shard order, so a
+    ``k``-fold repeat samples that series ``k`` times as often and ``count_positions`` counts it ``k`` times);
+    validation files are never repeated.  Every listed series must exist.
+
+    Per series: if the build wrote a game-level hold-out series (``<name>.val-NNNNN.npz``,
+    ``build_shards(val_every=k)`` / eval shards' FEN-hash split) that series *is* the validation set
+    (``val_fraction`` is ignored) and no validation game has a position in the training shards.  Otherwise
+    the files are sorted, permuted with ``seed`` and the last ``round(val_fraction * n)`` (at least one when
+    ``val_fraction > 0`` and there are >= 2 shards) become the validation set — a *shard*-level split: shards
+    are shuffled at the position level, so positions of the same game then sit in both sets (a warning says so).
     """
+    series = parse_shard_names(name)
+    if series is None or (len(series) == 1 and series[0][1] == 1):
+        return _split_series(shard_dir, val_fraction, seed, series[0][0] if series else None)
+    train_files: list[Path] = []
+    val_files: list[Path] = []
+    for series_name, repeat in series:
+        tr, va = _split_series(shard_dir, val_fraction, seed, series_name)
+        train_files.extend(tr * repeat)
+        val_files.extend(va)
+    return train_files, val_files
+
+
+def _split_series(shard_dir: str | Path, val_fraction: float, seed: int,
+                  name: str | None) -> tuple[list[Path], list[Path]]:
     files = list_shards(shard_dir, name)
     if not files:
         pattern = f"{name}-*.npz" if name else "*.npz"
@@ -147,7 +223,7 @@ def load_split(shard_dir: str | Path, val_fraction: float = 0.05, seed: int = 0,
             f"no game-level validation series ({(name or '<name>') + VAL_SUFFIX}-NNNNN.npz) in {shard_dir}: "
             "holding out whole shards instead, which is NOT game-disjoint (positions of one game are spread "
             "over many shards) — rebuild with `fly build-shards --val-every K` for a clean val set",
-            stacklevel=2)
+            stacklevel=3)
     rng = np.random.default_rng(seed)
     perm = rng.permutation(len(files))
     n_val = round(val_fraction * len(files))
@@ -176,7 +252,8 @@ class ShardDataset(IterableDataset):
     Every epoch (``set_epoch``) the shard order is reshuffled with ``seed + epoch``; shards are
     then split across DataLoader workers (and optionally distributed ``rank``/``world_size``) at
     the shard level, and positions inside a shard are shuffled.  Yields dicts of numpy values:
-    ``planes uint8 (20, 8, 8)``, ``move``, ``value``, ``elo``, ``ply`` (python ints).
+    ``planes uint8 (20, 8, 8)``, ``move``, ``value``, ``elo``, ``ply`` (python ints) and ``value_scale``
+    (float, the shard's; the float value target is ``value / value_scale``).
     Use ``collate`` (below) as the DataLoader ``collate_fn``.
     """
 
@@ -217,6 +294,7 @@ class ShardDataset(IterableDataset):
         for f in self._my_files():
             shard = read_shard(f)
             n = shard["move"].shape[0]
+            scale = float(shard[VALUE_SCALE_KEY])
             idx = rng.permutation(n) if self.shuffle else np.arange(n)
             for i in idx:
                 yield {
@@ -225,6 +303,7 @@ class ShardDataset(IterableDataset):
                     "value": int(shard["value"][i]),
                     "elo": int(shard["elo"][i]),
                     "ply": int(shard["ply"][i]),
+                    VALUE_SCALE_KEY: scale,
                 }
 
 
@@ -236,12 +315,16 @@ def planes_to_float(planes_u8: np.ndarray) -> np.ndarray:
 
 
 def collate(batch: Sequence[dict]) -> dict[str, torch.Tensor]:
-    """DataLoader collate: ``planes float32 (B, 1280)``, ``move int64``, ``value float32``, ``elo``, ``ply`` int64."""
+    """DataLoader collate: ``planes float32 (B, 1280)``, ``move int64``, ``value float32``, ``elo``, ``ply`` int64.
+
+    ``value`` is the stored int8 divided by the item's ``value_scale`` (1 when absent): outcomes stay
+    ``+1 / 0 / -1``, quantised engine evaluations become ``int8 / 127`` in [-1, 1].
+    """
     planes = planes_to_float(np.stack([b["planes"] for b in batch])).reshape(len(batch), FLAT_INPUT)
     return {
         "planes": torch.from_numpy(planes),
         "move": torch.tensor([b["move"] for b in batch], dtype=torch.int64),
-        "value": torch.tensor([b["value"] for b in batch], dtype=torch.float32),
+        "value": torch.tensor([b["value"] / b.get(VALUE_SCALE_KEY, 1.0) for b in batch], dtype=torch.float32),
         "elo": torch.tensor([b["elo"] for b in batch], dtype=torch.int64),
         "ply": torch.tensor([b["ply"] for b in batch], dtype=torch.int64),
     }
@@ -250,6 +333,7 @@ def collate(batch: Sequence[dict]) -> dict[str, torch.Tensor]:
 __all__ = [
     "SHARD_KEYS",
     "SHARD_SIZE",
+    "VALUE_SCALE_KEY",
     "VAL_SUFFIX",
     "ShardDataset",
     "collate",
@@ -257,8 +341,10 @@ __all__ = [
     "list_shards",
     "list_val_shards",
     "load_split",
+    "parse_shard_names",
     "planes_to_float",
     "read_shard",
+    "read_value_scale",
     "shard_path",
     "shard_series",
     "val_name",

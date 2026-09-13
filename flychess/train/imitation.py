@@ -44,7 +44,7 @@ from flychess.train.metrics import MetricsLogger
 STAGE = "imitation"
 ACTIVITY_NEURONS = 2048
 ELO_MAX_PLIES = 200
-NO_DECAY_NAMES = ("bias", "leak_logit", "b_in")
+NO_DECAY_NAMES = ("bias", "leak_logit", "b_in", "b_ret", "central_b")
 ADAM_BETAS = (0.9, 0.95)
 
 

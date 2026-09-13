@@ -5,10 +5,23 @@
 can parse the blob with nothing but the header::
 
     csr_indptr i32 [n+1] · csr_indices i32 [nnz] · w f16 [nnz] (signed) · bias f32 [n] · alpha f32 [n]
-    · input_idx i32 [n_in] · output_idx i32 [n_out] · w_in f16 [n_in, input_dim] · b_in f32 [n_in]
+    · input_idx i32 [n_in] · output_idx i32 [n_out] · w_in f16 [n_in | 0, input_dim] · b_in f32 [n_in | 0]
     · policy_w f16 [num_moves, n_out] · policy_b f32 [num_moves] · value_w f16 [hidden|1, n_out]
     · value_b f32 [hidden|1] · (value_w2 f16 [1, hidden] · value_b2 f32 [1] if MLP)
-    · positions f16 [n, 3] in [0, 1] · super_class u8 [n]
+    · positions f16 [n, 3] in [0, 1] · super_class u8 [n] · node_perm i32 [n]
+    · retina_idx i32 [n_ret] · retina_square u8 [n_ret] · retina_uv f16 [n_ret, 2] · retina_eye u8 [n_ret]
+    · w_ret f16 [n_ret, num_planes] · b_ret f32 [n_ret]
+    · mod_indptr i32 [n+1 | 0] · mod_indices i32 [nnz_mod] · w_mod f16 [nnz_mod]
+    · central_idx i32 [n_central] · central_w f16 [central_dim, n_central] · central_b f32 [central_dim]
+    · retina_type u8 [n_ret]
+
+The arrays after ``node_perm`` are the optional features (retina input, neuromodulation, central
+summary); a feature that is off still writes its arrays with a zero length so the parser is uniform,
+and a blob written before they existed simply lacks them (feature off). Under ``neuromod`` the main
+CSR (``csr_indptr``/``csr_indices``/``w``, ``header.nnz``) holds the ionotropic synapses only and the
+DA/SER/OCT synapses live in the ``mod_*`` CSR (``header.nnz_mod``; ``header.nnz_total`` = all).
+``input_idx`` / ``output_idx`` are the MODEL's buffers (the checkpoint's sets), not the graph's; with
+``sensory_input=false`` ``w_in`` / ``b_in`` have zero rows (``input_idx`` is still written).
 
 ``numpy_forward`` is the reference implementation of what the JS engine must compute, using the
 rounded weights exactly as stored in the blob.
@@ -19,6 +32,7 @@ import gzip
 import hashlib
 import json
 import math
+import warnings
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -149,15 +163,35 @@ def export_web(
         node_inv, edge_perm = node_perm, np.arange(graph.nnz, dtype=np.int64)
         csr_indptr, csr_indices = graph.csr_indptr.astype(np.int32), graph.csr_indices.astype(np.int32)
         neuron_order = "canonical"
+    w_all = _t(model.effective_weights())
+    neuromod = bool(getattr(model, "neuromod", False))
+    if neuromod:  # main CSR = ionotropic synapses only; the modulatory ones get their own CSR below
+        ion, mod = model._structure_named("ion_"), model._structure_named("mod_")
+        csr_indptr, csr_indices = _t(ion.crow).astype(np.int32), _t(ion.col).astype(np.int32)
+        w_main = w_all[_t(model.ion_edges).astype(np.int64)]
+        mod_indptr, mod_indices = _t(mod.crow).astype(np.int32), _t(mod.col).astype(np.int32)
+        w_mod = w_all[_t(model.mod_edges).astype(np.int64)]
+    else:
+        w_main = w_all[edge_perm]
+        mod_indptr, mod_indices, w_mod = np.zeros(0, np.int32), np.zeros(0, np.int32), np.zeros(0, np.float32)
     add("csr_indptr", csr_indptr, "i32")
     add("csr_indices", csr_indices, "i32")
-    add_q("w", _t(model.effective_weights())[edge_perm])
+    add_q("w", w_main)
     add("bias", _t(model.bias).astype(np.float32)[node_perm], "f32")
     add("alpha", _t(model.leak()).astype(np.float32)[node_perm], "f32")
-    add("input_idx", node_inv[graph.input_idx].astype(np.int32), "i32")
-    add("output_idx", node_inv[graph.output_idx].astype(np.int32), "i32")
-    add_q("w_in", _t(model.w_in))
-    add("b_in", _t(model.b_in).astype(np.float32), "f32")
+    # The MODEL's sensory / motor sets (persistent buffers restored from the checkpoint), not the
+    # graph's: a graph rebuilt after training (e.g. with a retina) can list different input neurons,
+    # and w_in / the heads are paired with the neurons they were trained on.
+    input_idx, output_idx = _t(model.input_idx).astype(np.int64), _t(model.output_idx).astype(np.int64)
+    sensory_input = bool(getattr(model, "sensory_input", True))
+    add("input_idx", node_inv[input_idx].astype(np.int32), "i32")
+    add("output_idx", node_inv[output_idx].astype(np.int32), "i32")
+    if sensory_input:
+        add_q("w_in", _t(model.w_in))
+        add("b_in", _t(model.b_in).astype(np.float32), "f32")
+    else:                       # vision-only model: no dense projection (input_idx stays, for the visualiser)
+        add_q("w_in", np.zeros((0, int(cfg.input_dim)), np.float32))
+        add("b_in", np.zeros(0, np.float32), "f32")
     add_q("policy_w", _t(model.policy_head.weight))
     add("policy_b", _t(model.policy_head.bias).astype(np.float32), "f32")
     if isinstance(model.value_head, torch.nn.Sequential):
@@ -174,6 +208,44 @@ def export_web(
     add("positions", normalise_positions(graph.position).astype(np.float16)[node_perm], "f16")
     add("super_class", super_class_codes(graph.super_class)[node_perm], "u8")
     add("node_perm", node_perm.astype(np.int32), "i32")
+    # ---- optional features (always present; zero-length when off) ----
+    num_planes = int(cfg.input_dim // 64)
+    vision = bool(getattr(model, "vision", False))
+    n_ret = int(model.n_ret) if vision else 0
+    if vision:
+        retina_idx = np.asarray(graph.retina_idx).astype(np.int64)
+        retina_uv = np.asarray(getattr(graph, "retina_uv", np.zeros((n_ret, 2), np.float32)), np.float32)
+        retina_eye = np.asarray(getattr(graph, "retina_eye", np.zeros(n_ret, np.int8)))
+        retina_type = np.asarray(getattr(graph, "retina_type", np.array([""] * n_ret))).astype(str)
+        add("retina_idx", node_inv[retina_idx].astype(np.int32), "i32")
+        add("retina_square", np.asarray(graph.retina_square).astype(np.uint8), "u8")
+        add("retina_uv", retina_uv.reshape(n_ret, 2).astype(np.float16), "f16")
+        add("retina_eye", retina_eye.reshape(n_ret).astype(np.uint8), "u8")
+        add_q("w_ret", _t(model.w_ret).reshape(n_ret, num_planes))
+        add("b_ret", _t(model.b_ret).astype(np.float32), "f32")
+    else:
+        retina_type = np.zeros(0, dtype=str)
+        add("retina_idx", np.zeros(0, np.int32), "i32")
+        add("retina_square", np.zeros(0, np.uint8), "u8")
+        add("retina_uv", np.zeros((0, 2), np.float16), "f16")
+        add("retina_eye", np.zeros(0, np.uint8), "u8")
+        add_q("w_ret", np.zeros((0, num_planes), np.float32))
+        add("b_ret", np.zeros(0, np.float32), "f32")
+    add("mod_indptr", mod_indptr, "i32")
+    add("mod_indices", mod_indices, "i32")
+    add_q("w_mod", w_mod)
+    central_dim = int(getattr(model, "central_dim", 0))
+    n_central = int(model.n_central) if central_dim > 0 else 0
+    if central_dim > 0:
+        add("central_idx", node_inv[_t(model.central_idx).astype(np.int64)].astype(np.int32), "i32")
+        add_q("central_w", _t(model.central_proj.weight).reshape(central_dim, n_central))
+        add("central_b", _t(model.central_proj.bias).astype(np.float32), "f32")
+    else:
+        add("central_idx", np.zeros(0, np.int32), "i32")
+        add_q("central_w", np.zeros((0, 0), np.float32))
+        add("central_b", np.zeros(0, np.float32), "f32")
+    type_legend = sorted(set(retina_type.tolist()))
+    add("retina_type", np.array([type_legend.index(t) for t in retina_type.tolist()], dtype=np.uint8), "u8")
 
     # ---- lay out the blob ----
     entries: list[dict[str, Any]] = []
@@ -210,13 +282,26 @@ def export_web(
         "value_hidden": int(cfg.value_hidden),
         "dale": bool(cfg.dale),
         "n": int(graph.n),
-        "nnz": int(graph.nnz),
+        # nnz = entries of the main CSR (what the recurrent loop iterates): all synapses, or only the
+        # ionotropic ones under neuromod (the DA/SER/OCT synapses are then in mod_* / nnz_mod)
+        "nnz": int(csr_indices.shape[0]),
+        "nnz_mod": int(mod_indices.shape[0]),
+        "nnz_total": int(graph.nnz),
         "total_synapses": int(graph.meta.get("total_syn_count") or float(graph.syn_count.sum())),
-        "n_in": int(graph.n_in),
-        "n_out": int(graph.n_out),
+        "n_in": int(input_idx.size),
+        "n_out": int(output_idx.size),
         "num_moves": int(cfg.num_moves),
         "input_dim": int(cfg.input_dim),
-        "num_planes": int(cfg.input_dim // 64),
+        "num_planes": num_planes,
+        "vision": vision,
+        "sensory_input": sensory_input,
+        "readout_steps": [int(t) for t in getattr(model, "readout_steps", (cfg.steps,))],
+        "neuromod": neuromod,
+        "central_dim": central_dim,
+        "n_ret": n_ret,
+        "n_central": n_central,
+        "retina_type_legend": type_legend,
+        "retina": dict(graph.meta.get("retina", {})) if isinstance(graph.meta.get("retina", {}), dict) else {},
         "run_name": extra_meta.pop("run_name", ""),
         "train_steps": int(extra_meta.pop("train_steps", 0)),
         "exported_at": datetime.now(UTC).isoformat(timespec="seconds"),
@@ -230,6 +315,12 @@ def export_web(
         "arrays": entries,
     }
     header.update(extra_meta)  # any remaining caller metadata (must be JSON-serialisable)
+    features = [name for name, on in (("vision", vision), ("neuromod", neuromod), ("central_dim", central_dim > 0),
+                                      ("readout_steps", len(header["readout_steps"]) > 1),
+                                      ("sensory_input=false", not sensory_input)) if on]
+    if features:
+        warnings.warn("the exported brain relies on the SPEC §8 optional features " + ", ".join(features)
+                      + ": the browser engine must implement them (numpy_forward is the reference)")
 
     (out_dir / "brain.flyb").write_bytes(blob)
     (out_dir / "brain.flyb.gz").write_bytes(gz)
@@ -278,11 +369,18 @@ def numpy_forward(arrays: dict[str, np.ndarray], header: dict[str, Any], x1280: 
     """Pure-numpy forward pass mirroring ``web/engine/flybrain.js`` → ``(policy (num_moves,), value, h (n,))``.
 
     Single position. Uses the stored (quantised) weights, float32 state, SpMV via CSR gather + bincount.
+    Implements every optional feature the header may declare (all default to off, so old blobs still
+    run): ``vision`` (retina injection ``w_ret[k] . planes[:, retina_square[k]] + b_ret[k]`` into
+    ``retina_idx``), ``sensory_input`` (the dense ``w_in`` path; default on), ``readout_steps``
+    (concatenated ``output_idx`` activity at those 1-based steps; default final step), ``neuromod``
+    (``pre = ion * (1 + tanh(mod))`` with the ``mod_*`` CSR) and ``central_dim`` (``central_w @
+    h_T[central_idx] + central_b`` appended to the head input).
     The value MLP's hidden non-linearity is ``header['value_activation']`` (falls back to ``activation``).
     """
     entries = {e["name"]: e for e in header["arrays"]}
     deq = lambda name: _dequantise(arrays[name], entries[name])
     n, steps = header["n"], header["steps"]
+    num_planes = int(header.get("num_planes", 20))
     indptr = arrays["csr_indptr"].astype(np.int64)
     col = arrays["csr_indices"].astype(np.int64)
     rows = np.repeat(np.arange(n, dtype=np.int64), np.diff(indptr))
@@ -291,16 +389,45 @@ def numpy_forward(arrays: dict[str, np.ndarray], header: dict[str, Any], x1280: 
     input_idx = arrays["input_idx"].astype(np.int64)
     output_idx = arrays["output_idx"].astype(np.int64)
     act = _np_act(header["activation"], float(header.get("activation_sat", 10.0)))
+    sensory = bool(header.get("sensory_input", True))
+    vision = bool(header.get("vision", False)) and arrays.get("retina_idx", np.zeros(0)).size > 0
+    neuromod = bool(header.get("neuromod", False)) and arrays.get("mod_indices", np.zeros(0)).size > 0
+    central_dim = int(header.get("central_dim", 0))
+    readout = [int(t) for t in (header.get("readout_steps") or [steps])]
 
     x = np.asarray(x1280, dtype=np.float32).reshape(-1)
-    h_in = deq("w_in") @ x + deq("b_in")                         # (n_in,)
+    h_in = deq("w_in") @ x + deq("b_in") if sensory else None                # (n_in,)
+    if vision:
+        retina_idx = arrays["retina_idx"].astype(np.int64)
+        square = arrays["retina_square"].astype(np.int64)
+        planes = x.reshape(num_planes, 64)
+        r_in = (deq("w_ret") * planes[:, square].T).sum(1) + deq("b_ret")   # (n_ret,)
+    if neuromod:
+        mod_indptr = arrays["mod_indptr"].astype(np.int64)
+        mod_col = arrays["mod_indices"].astype(np.int64)
+        mod_rows = np.repeat(np.arange(n, dtype=np.int64), np.diff(mod_indptr))
+        w_mod = deq("w_mod")
     h = np.zeros(n, dtype=np.float32)
+    feats = []
     for t in range(steps):
-        pre = np.bincount(rows, weights=w * h[col], minlength=n).astype(np.float32) if t > 0 else np.zeros(n, np.float32)
+        if t > 0:
+            pre = np.bincount(rows, weights=w * h[col], minlength=n).astype(np.float32)
+            if neuromod:
+                mod = np.bincount(mod_rows, weights=w_mod * h[mod_col], minlength=n).astype(np.float32)
+                pre = pre * (1.0 + np.tanh(mod))
+        else:
+            pre = np.zeros(n, np.float32)
         pre = pre + bias
-        pre[input_idx] += h_in
+        if sensory:
+            pre[input_idx] += h_in
+        if vision:
+            np.add.at(pre, retina_idx, r_in)   # a photoreceptor may also be a sensory input neuron
         h = ((1.0 - alpha) * h + alpha * act(pre)).astype(np.float32)
-    out = h[output_idx]
+        if t + 1 in readout:
+            feats.append(h[output_idx])
+    if central_dim > 0:
+        feats.append(deq("central_w") @ h[arrays["central_idx"].astype(np.int64)] + deq("central_b"))
+    out = np.concatenate(feats).astype(np.float32)
     policy = deq("policy_w") @ out + deq("policy_b")
     v = deq("value_w") @ out + deq("value_b")
     if header.get("value_head") == "mlp":

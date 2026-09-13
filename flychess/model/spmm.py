@@ -39,15 +39,35 @@ warnings.filterwarnings("ignore", message="Sparse invariant checks are implicitl
 def transpose_csr(indptr: np.ndarray, indices: np.ndarray, n: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Return ``(crow_t, col_t, perm_t)`` of the transposed CSR so that ``values_t = values[perm_t]``.
 
-    ``perm_t`` is a stable argsort of the column indices; within each transposed row the entries are
-    therefore sorted by original row, i.e. the transposed CSR is canonical as well.
+    ``n`` is the number of COLUMNS of the matrix (= rows of the transpose); the number of rows comes
+    from ``indptr`` (rectangular matrices are fine). ``perm_t`` is a stable argsort of the column
+    indices; within each transposed row the entries are therefore sorted by original row, i.e. the
+    transposed CSR is canonical as well.
     """
-    counts_t = np.bincount(indices, minlength=n)
+    n_rows = int(indptr.shape[0]) - 1
+    counts_t = np.bincount(np.asarray(indices, dtype=np.int64), minlength=n)
     crow_t = np.concatenate([[0], np.cumsum(counts_t)]).astype(np.int64)
     perm_t = np.argsort(indices, kind="stable")
-    rows = np.repeat(np.arange(n, dtype=np.int64), np.diff(indptr))
+    rows = np.repeat(np.arange(n_rows, dtype=np.int64), np.diff(indptr))
     col_t = rows[perm_t]
     return crow_t, col_t, perm_t
+
+
+def subset_csr(indptr: np.ndarray, indices: np.ndarray, keep: np.ndarray
+               ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """The sub-CSR made of the entries where ``keep`` (bool, (nnz,)) is True, same rows.
+
+    Returns ``(indptr_sub, indices_sub, sel)`` with ``sel = flatnonzero(keep)`` so that
+    ``values_sub = values[sel]``. Row order and the within-row column order are preserved, so a
+    canonical CSR stays canonical. Used to split the connectome into ionotropic and modulatory synapses.
+    """
+    keep = np.asarray(keep, dtype=bool)
+    n = int(indptr.shape[0]) - 1
+    rows = np.repeat(np.arange(n, dtype=np.int64), np.diff(indptr))
+    sel = np.flatnonzero(keep)
+    counts = np.bincount(rows[sel], minlength=n)
+    indptr_sub = np.concatenate([[0], np.cumsum(counts)]).astype(indptr.dtype)
+    return indptr_sub, np.asarray(indices)[sel], sel
 
 
 class SparseStructure:
@@ -55,7 +75,9 @@ class SparseStructure:
 
     Attributes
     ----------
-    n : int                 number of neurons (matrix is (n, n)).
+    n : int                 number of neurons = columns of the matrix (the state ``h`` has ``n`` rows).
+    n_rows : int            rows of the matrix — ``n`` for the connectome itself, fewer for a row-compressed
+                            sub-matrix (e.g. only the neurons that receive modulatory synapses).
     nnz : int               number of synapses.
     crow, col : Tensor      forward CSR (``index_dtype``), rows = post, cols = pre.
     crow_t, col_t : Tensor  transposed CSR (rows = pre, cols = post).
@@ -95,8 +117,26 @@ class SparseStructure:
             self.col_t = torch.as_tensor(col_t, dtype=index_dtype).to(device)
             self.perm_t = torch.as_tensor(perm_t, dtype=torch.int64).to(device)
         self.nnz = int(self.col.shape[0])
+        self.n_rows = int(self.crow.shape[0]) - 1
         self._rows: torch.Tensor | None = None  # lazily built for the gather fallback
         self._sddmm_failed = False
+
+    @classmethod
+    def from_csr(cls, indptr: np.ndarray, indices: np.ndarray, n: int, device: torch.device | str = "cpu",
+                 index_dtype: torch.dtype = torch.int32) -> SparseStructure:
+        """Structure of an arbitrary CSR pattern with ``n`` columns (e.g. a :func:`subset_csr` of the
+        connectome, or a row-compressed one: ``len(indptr) - 1`` rows may be fewer than ``n``)."""
+        indptr, indices = np.asarray(indptr), np.asarray(indices)
+        crow_t, col_t, perm_t = transpose_csr(indptr, indices, int(n))
+        device = torch.device(device)
+        tensors = {
+            "crow": torch.as_tensor(indptr, dtype=index_dtype).to(device),
+            "col": torch.as_tensor(indices, dtype=index_dtype).to(device),
+            "crow_t": torch.as_tensor(crow_t, dtype=index_dtype).to(device),
+            "col_t": torch.as_tensor(col_t, dtype=index_dtype).to(device),
+            "perm_t": torch.as_tensor(perm_t, dtype=torch.int64).to(device),
+        }
+        return cls(tensors=tensors, n=int(n), index_dtype=index_dtype)
 
     # ---- helpers ------------------------------------------------------------------------------
     @property
@@ -120,17 +160,17 @@ class SparseStructure:
 
     def csr(self, values: torch.Tensor) -> torch.Tensor:
         """Forward CSR tensor ``W`` with the given values (no copy of the indices)."""
-        return torch.sparse_csr_tensor(self.crow, self.col, values, (self.n, self.n))
+        return torch.sparse_csr_tensor(self.crow, self.col, values, (self.n_rows, self.n))
 
     def csr_t(self, values: torch.Tensor) -> torch.Tensor:
         """Transposed CSR tensor ``Wᵀ`` for forward-ordered ``values``."""
-        return torch.sparse_csr_tensor(self.crow_t, self.col_t, values[self.perm_t], (self.n, self.n))
+        return torch.sparse_csr_tensor(self.crow_t, self.col_t, values[self.perm_t], (self.n, self.n_rows))
 
     def rows(self) -> torch.Tensor:
         """Row (post-synaptic) index of every synapse, int64 — built lazily (gather fallback only)."""
         if self._rows is None:
             crow = self.crow.to(torch.int64)
-            self._rows = torch.repeat_interleave(torch.arange(self.n, device=self.device), crow[1:] - crow[:-1])
+            self._rows = torch.repeat_interleave(torch.arange(self.n_rows, device=self.device), crow[1:] - crow[:-1])
         return self._rows
 
     def dense(self, values: torch.Tensor) -> torch.Tensor:
@@ -139,7 +179,7 @@ class SparseStructure:
 
     # ---- products -----------------------------------------------------------------------------
     def spmm(self, values: torch.Tensor, h: torch.Tensor) -> torch.Tensor:
-        """``W @ h`` with ``h: (n, B)`` → ``(n, B)``, differentiable w.r.t. both arguments."""
+        """``W @ h`` with ``h: (n, B)`` → ``(n_rows, B)``, differentiable w.r.t. both arguments."""
         return SpMM.apply(values, h, self)
 
     def spmm_t(self, values: torch.Tensor, g: torch.Tensor) -> torch.Tensor:
@@ -160,7 +200,7 @@ class SparseStructure:
 
     def _sddmm_sampled(self, g: torch.Tensor, h: torch.Tensor) -> torch.Tensor:
         zero = torch.sparse_csr_tensor(self.crow, self.col, torch.zeros(self.nnz, dtype=g.dtype, device=g.device),
-                                       (self.n, self.n))
+                                       (self.n_rows, self.n))
         return torch.sparse.sampled_addmm(zero, g, h.t()).values()
 
     def _sddmm_gather(self, g: torch.Tensor, h: torch.Tensor) -> torch.Tensor:
@@ -210,9 +250,8 @@ def spmm(values: torch.Tensor, h: torch.Tensor, structure: SparseStructure) -> t
 
 def spmm_dense_reference(values: torch.Tensor, h: torch.Tensor, structure: SparseStructure) -> torch.Tensor:
     """Dense reference ``W @ h`` using ordinary autograd — tests only (O(n²) memory)."""
-    n = structure.n
     rows = structure.rows()
     col = structure.col.to(torch.int64)
-    w = torch.zeros(n, n, dtype=values.dtype, device=values.device)
+    w = torch.zeros(structure.n_rows, structure.n, dtype=values.dtype, device=values.device)
     w = w.index_put((rows, col), values)  # differentiable scatter of the values
     return w @ h

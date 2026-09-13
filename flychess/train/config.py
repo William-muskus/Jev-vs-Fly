@@ -15,6 +15,7 @@ from typing import Any
 import yaml
 
 from flychess import paths
+from flychess.data.shards import parse_shard_names
 from flychess.model.config import BrainConfig
 
 STAGES = ("imitation", "selfplay", "all")
@@ -45,7 +46,9 @@ class TrainConfig:
 
     # ---- data ----
     shards_dir: str = str(paths.SHARDS_DIR)
-    shard_name: str | None = None              # only shards '<shard_name>-*.npz'; None = every shard
+    # shard series to train on: None = every series; 'lichess2014' = only 'lichess2014-*.npz';
+    # 'lichess2014,lichess2015,evals:3' = several, ':k' repeats (oversamples) a series k times (see shard_series())
+    shard_name: str | None = None
     val_fraction: float = 0.02
 
     # ---- imitation optimisation ----
@@ -100,6 +103,9 @@ class TrainConfig:
             raise ValueError("max_steps must be >= 0 or None")
         if not (0.0 <= self.val_fraction < 1.0):
             raise ValueError("val_fraction must lie in [0, 1)")
+        if self.shard_name is not None:
+            self.shard_name = str(self.shard_name).strip() or None
+            parse_shard_names(self.shard_name)  # raises on a malformed list / repeat factor
         for name in ("log_every", "eval_every", "checkpoint_every", "eval_batches", "elo_games", "num_workers",
                      "warmup_steps", "elo_every", "selfplay_eval_every_iters"):
             v = getattr(self, name)
@@ -123,6 +129,13 @@ class TrainConfig:
 
     def run_dir(self) -> Path:
         return paths.run_dir(self.run)
+
+    def shard_series(self) -> list[tuple[str, int]] | None:
+        """``shard_name`` parsed into ``[(series, repeat), ...]`` (None = every series) for ``load_split``.
+
+        ``load_split(cfg.shards_dir, cfg.val_fraction, cfg.seed, cfg.shard_name)`` accepts the raw string too.
+        """
+        return parse_shard_names(self.shard_name)
 
     # ---- (de)serialisation -----------------------------------------------------------------------
     def to_dict(self) -> dict[str, Any]:

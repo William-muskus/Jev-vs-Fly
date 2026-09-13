@@ -76,6 +76,20 @@ def edges_of(g: BrainGraph) -> set[tuple[int, int]]:
 
 
 # ---- load.py: aggregation --------------------------------------------------------------------------
+@pytest.fixture(autouse=True)
+def _no_real_column_table(monkeypatch, tmp_path: Path):
+    """Hermetic builds: a synthetic connectome must never pick up the real `column_assignment.csv.gz`
+    from data/connectome (the retina would then depend on what the machine has downloaded). The
+    builder's "building WITHOUT a retina" warning is expected here and silenced; the retina itself is
+    tested with its own column table in tests/test_retina.py."""
+    import warnings
+
+    monkeypatch.setattr(paths, "CONNECTOME_DIR", tmp_path / "no-connectome-tables")
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message=".*column_assignment.csv.gz not found.*")
+        yield
+
+
 def test_aggregate_sums_and_picks_dominant_row():
     n = 5
     pre = np.array([0, 0, 0, 1, 1, 2, 3, 3], dtype=np.int32)
@@ -505,3 +519,33 @@ def test_summary_distinguishes_connections_from_synapses():
     assert f"connections={g.nnz:,}" in text
     assert f"synapses={int(g.syn_count.sum()):,}" in text
     assert int(g.syn_count.sum()) > g.nnz  # every connection carries >= 5 synapses, so the two must differ
+
+
+# ---- v3 optional fields (nt_type / retina, see tests/test_retina.py for the retina itself) ----------
+def test_build_populates_nt_type_and_empty_retina_without_column_table(tmp_path: Path, monkeypatch):
+    """A synthetic connectome has no column assignments: the graph gets `nt_type` (per-neuron label,
+    origin of the signs) but an empty retina, and both survive a save/load round trip. The test is
+    hermetic: `paths.CONNECTOME_DIR` points at an empty directory (autouse fixture) so the real
+    `column_assignment.csv.gz` (if downloaded) is never read, and the builder must warn about it."""
+    conn = make_conn(4, [(0, 1, 5), (1, 0, 5), (2, 1, 5), (3, 1, 5)],
+                     nt_type=["GABA", "ACH", "", ""], edge_nt=["ACH", "GABA", "GLUT", "ACH"])
+    with pytest.warns(UserWarning, match="column_assignment.csv.gz not found"):
+        g = build_brain_graph(conn, GraphConfig(max_inputs=0, max_outputs=0))
+    assert g.has_nt_type and g.nt_type.tolist() == ["GABA", "ACH", "GLUT", "ACH"]
+    assert np.array_equal(g.sign, edge_signs(g.nt_type[g.csr_indices]))
+    assert not g.has_retina and g.n_ret == 0 and g.meta["n_ret"] == 0
+    assert g.meta["retina"] == {"enabled": False, "n_ret": 0, "reason": "column_assignment.csv.gz missing"}
+    g2 = BrainGraph.load(g.save(tmp_path / "g.npz"))
+    g2.validate()
+    assert g2.nt_type.tolist() == g.nt_type.tolist() and not g2.has_retina
+    assert "retina" not in g2.summary()
+    # retina=False skips the column table entirely (no warning)
+    import warnings
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        g3 = build_brain_graph(conn, GraphConfig(max_inputs=0, max_outputs=0, retina=False))
+    assert g3.meta["retina"] == {"enabled": False, "n_ret": 0, "reason": "disabled by GraphConfig.retina=False"}
+    # GraphConfig round-trips through to_dict with the new options
+    d = GraphConfig(retina_max=256).to_dict()
+    assert d["retina"] is True and d["retina_max"] == 256 and d["retina_field"] == "split"

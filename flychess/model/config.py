@@ -11,6 +11,20 @@ ACTIVATIONS = ("relu", "gelu", "tanh", "satrelu")
 DTYPES = ("float32", "bfloat16", "float16", "float64")
 
 
+def _parse_steps(v: Any) -> tuple[int, ...]:
+    """``()`` / ``(8, 16)`` / ``[8, 16]`` / ``'8,16'`` / ``8`` -> tuple of ints."""
+    if v is None:
+        return ()
+    if isinstance(v, str):
+        v = [p for p in v.replace(";", ",").split(",") if p.strip()]
+    if isinstance(v, (int, float)) and not isinstance(v, bool):
+        v = [v]
+    try:
+        return tuple(int(t) for t in v)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"readout_steps must be a sequence of ints, got {v!r}") from exc
+
+
 @dataclass
 class BrainConfig:
     """See docs/SPEC.md §4.
@@ -30,6 +44,15 @@ class BrainConfig:
                               recommended way to get bf16 compute; a bf16 parameter dtype has no fp32 master
                               weights, so small updates to the dense parts can round away).
     value_hidden : int        hidden width of the value MLP; 0 = plain ``Linear(n_out, 1)``.
+    vision : bool             inject the board through the retina (``graph.retina_idx`` photoreceptors, each
+                              looking at one board square through ``w_ret``) when the graph has one.
+    sensory_input : bool      keep the dense ``w_in`` projection into ``input_idx`` (the pre-retina input path).
+    readout_steps : tuple     1-based timesteps whose ``output_idx`` activity is concatenated into the head
+                              input; empty = final step only. Each must lie in ``1..steps``, strictly increasing.
+    neuromod : bool           synapses from DA / SER / OCT neurons gate the others multiplicatively
+                              (``pre = ion * (1 + tanh(mod)) + bias + inputs``) instead of adding to them.
+    central_dim : int         0 = off; else a ``Linear(n_central, central_dim)`` of the final activity of the
+                              graph's ``'central'`` neurons is concatenated to the head input.
     """
 
     graph_path: str = ""
@@ -43,6 +66,11 @@ class BrainConfig:
     dale: bool = True
     dtype: str = "float32"
     value_hidden: int = 256
+    vision: bool = True
+    sensory_input: bool = True
+    readout_steps: tuple[int, ...] = ()
+    neuromod: bool = False
+    central_dim: int = 0
 
     def __post_init__(self) -> None:
         if self.activation not in ACTIVATIONS:
@@ -56,10 +84,28 @@ class BrainConfig:
         if self.steps < 1:
             raise ValueError("steps must be >= 1")
         self.graph_path = str(self.graph_path)
+        self.readout_steps = _parse_steps(self.readout_steps)
+        if any(t < 1 or t > self.steps for t in self.readout_steps):
+            raise ValueError(f"readout_steps must lie in 1..steps={self.steps}, got {self.readout_steps}")
+        if any(b <= a for a, b in zip(self.readout_steps, self.readout_steps[1:])):
+            raise ValueError(f"readout_steps must be strictly increasing, got {self.readout_steps}")
+        if self.central_dim < 0:
+            raise ValueError("central_dim must be >= 0")
+        if not (self.vision or self.sensory_input):
+            raise ValueError("at least one of vision / sensory_input must be enabled (the board has to get in)")
+        self.vision, self.sensory_input, self.neuromod = bool(self.vision), bool(self.sensory_input), bool(self.neuromod)
+        self.central_dim = int(self.central_dim)
+
+    @property
+    def effective_readout_steps(self) -> tuple[int, ...]:
+        """``readout_steps`` with the empty default resolved to ``(steps,)``."""
+        return self.readout_steps or (self.steps,)
 
     # ---- (de)serialisation ---------------------------------------------------------------------
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        d = asdict(self)
+        d["readout_steps"] = list(self.readout_steps)  # YAML-safe (safe_dump has no tuple tag)
+        return d
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> BrainConfig:

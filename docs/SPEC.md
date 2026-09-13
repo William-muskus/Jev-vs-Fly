@@ -207,24 +207,67 @@ class BrainConfig:
     dale: bool = True         # enforce signs
     dtype: str = 'float32'
     value_hidden: int = 256   # hidden width of the value MLP (0 = plain Linear(n_out, 1))
+    vision: bool = True       # retina input (graph.retina_idx photoreceptors, one board square each) when the graph has one
+    sensory_input: bool = True       # dense w_in projection into input_idx (at least one of vision / sensory_input)
+    readout_steps: tuple[int, ...] = ()  # 1-based timesteps whose output_idx activity feeds the heads; () = final step
+    neuromod: bool = False    # DA / SER / OCT synapses gate the others multiplicatively instead of adding
+    central_dim: int = 0      # 0 = off; else Linear(n_central, central_dim) of the final 'central' activity -> head input
 ```
+`readout_steps` entries must lie in `1..steps` and be strictly increasing (`effective_readout_steps` resolves `()`
+to `(steps,)`); `to_dict()` stores it as a list (YAML-safe). Old configs without the new keys get these defaults.
 Parameters:
-- `syn_gain: (nnz,)` — `w = sign * softplus(syn_gain)`; init `syn_gain = inverse_softplus(scale * log1p(syn_count) / normaliser)`
+- `syn_gain: (nnz,)` — one parameter over ALL synapses in canonical graph order; `w = sign * softplus(syn_gain)`;
+  init `syn_gain = inverse_softplus(scale * log1p(syn_count) / normaliser)`
   where `normaliser` makes the expected row sum of |w| ≈ 1 (spectral-radius-ish control; document formula in code).
+  With `dale=False` `w = syn_gain` (free sign), except under `neuromod`, where the modulatory synapses are always
+  `softplus(syn_gain)` (positive gains).
 - `bias: (n,)` init 0 · `leak_logit: (n,)` init logit(alpha).
-- `w_in: (n_in, input_dim)` + `b_in: (n_in,)` — board planes injected into `input_idx` neurons each step.
-- `policy_head: Linear(n_out, num_moves)`, `value_head: Linear(n_out, 1)` (or small MLP `n_out→256→1`), applied to
-  the final-step activity of `output_idx` neurons.
+- `w_in: (n_in, input_dim)` + `b_in: (n_in,)` — board planes injected into `input_idx` neurons each step (`sensory_input`;
+  with `sensory_input=False` they are not created at all — absent from the state_dict and the optimiser).
+- `w_ret: (n_ret, NUM_PLANES=20)` + `b_ret: (n_ret,)` — retina (`vision`, only when `graph.has_retina`): photoreceptor
+  `k` (graph neuron `retina_idx[k]`) receives `w_ret[k] · planes[:, retina_square[k]] + b_ret[k]` each step, where
+  `planes = x.view(B, 20, 64)` and `retina_square` is the square index `rank*8+file` in the mover's perspective (§3).
+  Init `w_ret ~ N(0, 1/sqrt(20))`, `b_ret = 0`. Implemented as one batched matmul per square (photoreceptors grouped
+  by square, padded). The model would simply add both injections to a neuron that is both a photoreceptor and an
+  `input_idx` neuron, but `BrainGraph.validate()` keeps the two sets disjoint. `config.vision=True` on a graph without a
+  retina runs with the sensory path only and **warns** (the builder produces such a graph silently when the column
+  table is missing); with `sensory_input=False` as well the constructor **raises** — a network the board cannot reach
+  must never train.
+- `central_proj: Linear(n_central, central_dim)` (`central_dim > 0`) on the final activity of the neurons with
+  `super_class == 'central'` (`central_idx`, buffer), in fp32 under the dense dtype; raises if the graph has none.
+- `policy_head: Linear(head_in, num_moves)`, `value_head: Linear(head_in, 1)` (or small MLP `head_in→256→1`), with
+  `head_in = n_out * len(readout_steps) + central_dim`: the concatenation of the `output_idx` activity at every
+  readout timestep (in order) followed by the central features.
+Neuromodulation (`neuromod`): the synapses are split by the PRE-synaptic neuron's `graph.nt_type` into ionotropic
+(`ACH/GABA/GLUT/''`) and modulatory (`DA/SER/OCT`) sub-CSRs — a fixed index partition of the same `syn_gain`, so
+checkpoints and exports are independent of the flag. A graph without `nt_type` gives no modulatory synapses (with a
+warning; the dynamics are then the plain ones). The loop multiplies with the modulatory CSR compressed to its non-empty
+rows and columns (`mod_rows`, `mod_cols`; full brain: 37,011 modulatory synapses, 12,261 gated rows = 9.1 % of the
+neurons, 2,423 columns = 1.8 %, every DA/SER/OCT neuron) and gates those rows in place.
 Dynamics (batch-first `h: (B, n)` is fine; SpMM internally transposes to `(n, B)` if faster):
 ```
 h_0 = 0
 for t in range(steps):
-    inp = zeros(B, n); inp[:, input_idx] = x @ w_in.T + b_in
-    pre = SpMM(w, h_t) + bias + inp             # SpMM: out[b, post] = Σ_pre w[post,pre] * h[b, pre]
+    inp = zeros(B, n); inp[:, input_idx] += x @ w_in.T + b_in                    # if sensory_input
+    inp[:, retina_idx[k]] += planes[:, :, retina_square[k]] @ w_ret[k] + b_ret[k]  # if vision, for every k
+    ion = SpMM(w_ion, h_t)                      # SpMM: out[b, post] = Σ_pre w[post,pre] * h[b, pre]
+    pre = ion * (1 + tanh(SpMM(w_mod, h_t))) + bias + inp    # neuromod; without it pre = SpMM(w, h_t) + bias + inp
     h_{t+1} = (1 - a) * h_t + a * act(pre)      # a = sigmoid(leak_logit)
-policy_logits = policy_head(h_T[:, output_idx]);  value = tanh(value_head(h_T[:, output_idx]))
+feat = concat([h_t[:, output_idx] for t in readout_steps] + [central_proj(h_T[:, central_idx])])   # last term if central_dim
+policy_logits = policy_head(feat);  value = tanh(value_head(feat))
 ```
 `forward(x: (B,1280)) -> (policy_logits (B,4168), value (B,1), h_T (B,n) optional)`.
+`FlyBrain.from_checkpoint` loads a checkpoint written before the retina existed (no `w_ret`) with `vision=False`
+(warning) even on a graph that has since gained a retina — only when `sensory_input=True` (a vision-only config has no
+other input path, so the strict load then fails as a config error). A vision-only model drops a checkpoint's `w_in` /
+`b_in`. `input_idx` / `output_idx` are persistent buffers: the model plays with the **checkpoint's** sensory / motor
+sets even when the graph on disk was rebuilt with different ones (e.g. `data/brain/full.npz` rebuilt with a retina: 5
+former inputs became photoreceptors, 1,204 of the 2,048 sorted positions shifted), `from_checkpoint` warns when they
+differ, and the export (§8) writes the model's sets, never the graph's. Measured on the RTX 5080 (full brain, B=384,
+steps=16, satrelu, fused + RCM ordering, bf16 autocast, idle GPU): 8.8 ms/timestep fwd+bwd and 8.1 GB peak with every
+feature off (sensory only); vision instead of the sensory path 8.9 ms; readout_steps / central_dim cost < 2 %;
+all on (vision + sensory + readout (8,16) + neuromod + central_dim=64) 11.3 ms/timestep (+28 %, almost all of it
+neuromod) and +0.6 GB.
 Provide `forward(x, return_activity=True)` for visualisation. Policy loss masks illegal moves with `-inf` before
 cross-entropy. The module must be exportable: `state_dict()` + `BrainConfig` + graph path fully define the network.
 `model/spmm.py` implements a custom `torch.autograd.Function` (do NOT rely on `torch.sparse_csr_tensor(values_param)`
@@ -294,6 +337,9 @@ header lists `{name: string, dtype: 'f16'|'f32'|'i8', shape: [...], offset: int,
 for each array, in this order: `csr_indptr (i32)`, `csr_indices (i32)`, `w (f16, already signed = sign*softplus(gain))`,
 `bias (f32)`, `alpha (f32, = sigmoid(leak_logit))`, `input_idx (i32)`, `output_idx (i32)`, `w_in (f16, [n_in,1280])`,
 `b_in (f32)`, `policy_w (f16, [num_moves, n_out])`, `policy_b (f32)`, `value_w (f16, [1 or hidden, n_out])`, `value_b`,
+(`input_idx` / `output_idx` and `header.n_in` / `n_out` come from the MODEL's buffers — the checkpoint's sets, §4 — not
+from the graph; with `sensory_input=false` `w_in` / `b_in` are written with zero rows, `[0, 1280]` / `[0]`, and
+`input_idx` stays for the visualiser),
 (if MLP value head, also `value_w2`, `value_b2`), plus `positions (f16, [n,3])` normalised to [0,1] for the brain visualiser,
 and `super_class (u8, [n])` with a legend in the header, then `node_perm (i32, [n])`. The blob's neuron order is the
 model's cache-friendly compute ordering (`header.neuron_order = 'rcm'`, reverse Cuthill-McKee; every per-neuron and
@@ -302,6 +348,29 @@ index of blob neuron `i`. Header also has `steps, activation, n, nnz, n_in, n_ou
 num_planes, run_name, train_steps, exported_at, elo_estimates, total_bytes, gzip_bytes, blob_sha256`; the loader verifies every
 downloaded (and every cached) blob against `total_bytes` / `blob_sha256` and versions blob URLs by the header so a stale HTTP cache
 can never pair a new header with old bytes.
+
+After `node_perm` come the optional-feature arrays (§4), always present and in this order, with zero length when the
+feature is off (2-D arrays keep their second dimension, e.g. `retina_uv [0, 2]`, `w_ret [0, 20]`), so the parser is
+uniform; a blob written before they existed simply lacks them, which the engines treat as "feature off":
+`retina_idx (i32, [n_ret], blob neuron index of every photoreceptor)`, `retina_square (u8, [n_ret], board square
+rank*8+file, mover's perspective)`, `retina_uv (f16, [n_ret, 2], eye-map coordinates in [0,1], left eye u < 0.5)`,
+`retina_eye (u8, [n_ret], 0 left / 1 right)`, `w_ret (f16, [n_ret, num_planes])`, `b_ret (f32, [n_ret])`,
+`mod_indptr (i32, [n+1] or [0])`, `mod_indices (i32, [nnz_mod])`, `w_mod (f16, [nnz_mod], positive)`,
+`central_idx (i32, [n_central], blob neuron indices)`, `central_w (f16, [central_dim, n_central])`,
+`central_b (f32, [central_dim])`, `retina_type (u8, [n_ret], index into header.retina_type_legend)`.
+The per-photoreceptor arrays are in the graph's `retina_idx` order; `retina_idx` / `central_idx` / `mod_*` are in the
+blob's (compute) neuron order like everything else. Header fields for them: `vision` (bool — false when the model has
+no retina path, whatever the config said), `sensory_input` (bool), `readout_steps` (list of 1-based steps, e.g.
+`[8, 16]`; the head input is the concatenation of `h_t[output_idx]` at those steps followed by the central features),
+`neuromod` (bool), `central_dim`, `n_ret`, `n_central`, `retina_type_legend` (sorted list of type names), `retina`
+(the graph's `meta['retina']`), `nnz_mod` and `nnz_total`. `export_web` warns which of these features the blob relies
+on (the browser engine must implement §8 for them). Under `neuromod` the main CSR (`csr_indptr`, `csr_indices`,
+`w`, and `header.nnz`) holds the ionotropic synapses only — the loop the JS engine already runs — and the DA/SER/OCT
+synapses live in `mod_*`; `nnz_total` is the graph's synapse count. Per timestep the engines compute
+`pre = ion * (1 + tanh(mod))` with `ion = W @ h`, `mod = W_mod @ h` (both over all `n` rows; a row without modulatory
+synapses has `mod = 0`), add `bias`, the `w_in` injection (if `sensory_input`) and the retina injection
+`w_ret[k] · planes[:, retina_square[k]] + b_ret[k]` into `retina_idx[k]` (if `vision`), then apply the leaky update.
+`flychess.export.numpy_forward` implements all of it and is the reference for `web/engine/flybrain.js`.
 Offsets are 8-byte aligned. `csr_indices` is stored as-is (i32) — simplicity over size. Target ≤ 45 MB raw for the full brain;
 `export-web` also writes `brain.flyb.gz` and the loader fetches the `.gz` when present, decoding with `DecompressionStream('gzip')`
 while streaming progress via `response.body.getReader()`, then caches the decoded buffer in the Cache API / IndexedDB.
@@ -344,8 +413,11 @@ heatmap (positions from graph → 2D projection); log tail. Dark theme, fly-them
 
 Static, no build step, ES modules. `index.html` loads `app.js` → creates a Web Worker (`engine/worker.js`) that
 fetches `model/brain.json` + `brain.flyb` with a progress bar ("growing the fly brain… 12 MB / 31 MB"), instantiates
-`FlyBrain` (`engine/flybrain.js`: pure typed-array CSR SpMV, identical math to §4) and answers `{type:'move', fen,
-difficulty}` with `{move, policyTop, value, activity(sampled), thinkMs}`. `engine/mcts.js` implements the same MCTS
+`FlyBrain` (`engine/flybrain.js`: pure typed-array CSR SpMV, identical math to §4) — and, when the browser has WebGPU,
+`FlyBrainGPU` (`engine/flybrain-gpu.js`: the same forward pass as f32 WGSL compute shaders, one command buffer per
+forward, asynchronous `forward()`; the worker falls back to `FlyBrain` when WebGPU is missing or the device is lost and
+reports `backend: 'webgpu' | 'js'`) — and answers `{type:'move', fen,
+difficulty}` with `{move, policyTop, value, activity(sampled), thinkMs, backend}`. `engine/mcts.js` implements the same MCTS
 as Python for `superfly`. Main thread: board UI (SVG, drag & click, legal-move dots, last-move highlight, promotion
 picker), fly avatar with mood driven by the value head (confident / nervous / panicking / smug), live "fly brain"
 canvas showing sampled neuron activity as glowing dots at connectome positions, move commentary from the

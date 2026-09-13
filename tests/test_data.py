@@ -31,7 +31,9 @@ from flychess.data.shards import (
     list_shards,
     list_val_shards,
     load_split,
+    parse_shard_names,
     read_shard,
+    read_value_scale,
     shard_series,
     write_shard,
 )
@@ -300,3 +302,91 @@ def test_build_shards_real_dump_smoke(tmp_path):
     print(stats.summary())
     assert stats.games_seen == 20000 and stats.games_kept > 500 and stats.positions > 30000
     assert count_positions(tmp_path) == stats.positions
+
+
+# ---------------------------------------------------------------------------------------------
+# value_scale, shard series lists / repeat factors
+# ---------------------------------------------------------------------------------------------
+def test_value_scale_roundtrip(tmp_path):
+    n = 8
+    planes = np.zeros((n, 20, 8, 8), np.uint8)
+    q = np.array([127, -127, 0, 64, -64, 1, -1, 100], np.int8)
+    base = {"move": np.arange(n, dtype=np.int16), "elo": np.zeros(n, np.int16), "ply": np.arange(n, dtype=np.int16)}
+    scaled = write_shard(tmp_path / "ev-00000.npz", planes, value=q, value_scale=127, **base)
+    plain = write_shard(tmp_path / "pl-00000.npz", planes, value=np.array([1, -1, 0, 1, -1, 0, 1, 0], np.int8), **base)
+    with np.load(scaled) as z:
+        assert "value_scale" in z.files and float(z["value_scale"]) == 127.0
+    with np.load(plain) as z:
+        assert "value_scale" not in z.files  # outcome shards keep the old 5-array layout
+    assert read_shard(scaled)["value_scale"] == 127.0 and read_shard(plain)["value_scale"] == 1.0
+    assert np.array_equal(read_shard(scaled)["value"], q)
+    assert read_value_scale(np.load(plain)) == 1.0
+    with pytest.raises(ValueError):
+        write_shard(tmp_path / "bad-00000.npz", planes, value=q, value_scale=0, **base)
+    # ShardDataset yields the int8 + the shard's scale; collate divides
+    items = list(ShardDataset([scaled], shuffle=False))
+    assert [it["value"] for it in items] == q.tolist() and all(it["value_scale"] == 127.0 for it in items)
+    batch = collate(items)
+    assert batch["value"].dtype == torch.float32
+    assert batch["value"].tolist() == pytest.approx((q.astype(np.float64) / 127).tolist())
+    assert batch["value"][0] == 1.0 and batch["value"][1] == -1.0
+    old_items = list(ShardDataset([plain], shuffle=False))
+    assert all(it["value_scale"] == 1.0 for it in old_items)
+    assert collate(old_items)["value"].tolist() == [1.0, -1.0, 0.0, 1.0, -1.0, 0.0, 1.0, 0.0]
+    # a batch may mix scales (e.g. lichess + evals shards)
+    mixed = collate([items[3], old_items[0]])
+    assert mixed["value"].tolist() == pytest.approx([64 / 127, 1.0])
+    # items without the key (older producers) count as scale 1
+    assert collate([{k: v for k, v in old_items[0].items() if k != "value_scale"}])["value"].tolist() == [1.0]
+
+
+def test_parse_shard_names():
+    assert parse_shard_names("lichess2014,lichess2015,evals:3") == [("lichess2014", 1), ("lichess2015", 1), ("evals", 3)]
+    assert parse_shard_names(" a , b:2 ,,") == [("a", 1), ("b", 2)]
+    assert parse_shard_names("fix") == [("fix", 1)]
+    assert parse_shard_names(None) is None and parse_shard_names("") is None and parse_shard_names([]) is None
+    assert parse_shard_names(["a", ("b", 2), "c:4"]) == [("a", 1), ("b", 2), ("c", 4)]
+    for bad in ("evals:x", "evals:0", "evals:-1", ":3", "a:1:2"):
+        with pytest.raises(ValueError):
+            parse_shard_names(bad)
+    from flychess.train.config import TrainConfig
+    cfg = TrainConfig(shard_name="lichess2014, evals:3")
+    assert cfg.shard_series() == [("lichess2014", 1), ("evals", 3)]
+    assert TrainConfig(shard_name="  ").shard_name is None and TrainConfig().shard_series() is None
+    with pytest.raises(ValueError):
+        TrainConfig(shard_name="evals:zero")
+
+
+def test_load_split_series_with_repeats(built, tmp_path):
+    import shutil
+    out = tmp_path / "shards"
+    shutil.copytree(built[0], out)
+    fix_files = list_shards(out, "fix")
+    # a second series with a game-level val hold-out next to the shard-level-only 'fix' series
+    build_shards(FIXTURE, out, name="ev", workers=1, shard_size=400, shuffle_buffer=500, chunk_chars=4000,
+                 progress=False, val_every=4)
+    ev_files, ev_val = list_shards(out, "ev"), list_val_shards(out, "ev")
+    assert ev_files and ev_val
+    with pytest.warns(UserWarning, match="NOT game-disjoint"):
+        fix_train, fix_val = load_split(out, val_fraction=0.25, seed=3, name="fix")
+    with pytest.warns(UserWarning, match="NOT game-disjoint"):
+        train, val = load_split(out, val_fraction=0.25, seed=3, name="fix,ev:3")
+    # train: fix (once) then ev three times; val: fix's held-out shards + ev's val series, never repeated
+    assert train == fix_train + ev_files * 3
+    assert val == fix_val + ev_val and len(set(val)) == len(val)
+    assert count_positions(train) == count_positions(fix_train) + 3 * count_positions(ev_files)
+    # the parsed list and the raw string are equivalent; a single name with repeat 1 is the plain path
+    with pytest.warns(UserWarning):
+        assert load_split(out, 0.25, 3, [("fix", 1), ("ev", 3)]) == (train, val)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        assert load_split(out, 0.25, 3, "ev") == (ev_files, ev_val) == load_split(out, 0.25, 3, "ev:1")
+        assert load_split(out, 0.25, 3, "ev:2") == (ev_files * 2, ev_val)
+    # the dataset oversamples a repeated series: each of its shards is visited `repeat` times per epoch
+    ds = ShardDataset(load_split(out, 0.0, 0, "ev:2")[0], seed=0)
+    plies = Counter(x["ply"] for x in ds)
+    assert plies == Counter(int(p) for f in ev_files for p in read_shard(f)["ply"] for _ in range(2))
+    # every listed series must exist
+    with pytest.raises(FileNotFoundError, match="nope"):
+        load_split(out, 0.25, 3, "fix,nope:2")
+    assert fix_files == list_shards(out, "fix")  # untouched by the extra series

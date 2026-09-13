@@ -19,6 +19,9 @@ from flychess import paths
 CACHE_NAME = "connectome.npz"
 REQUIRED_FILES = ("connections.csv.gz", "neurons.csv.gz")
 OPTIONAL_FILES = ("classification.csv.gz", "consolidated_cell_types.csv.gz", "coordinates.csv.gz")
+# Optic-lobe column assignments (Matsliah et al. 2024): NOT part of the connectome cache, loaded on
+# demand by `load_column_assignment` for the retina (flychess/connectome/retina.py).
+COLUMN_FILE = "column_assignment.csv.gz"
 
 
 @dataclass
@@ -116,6 +119,72 @@ class Connectome:
 def _ustr(a: np.ndarray) -> np.ndarray:
     """Unicode (non-object) string array so that it round-trips through npz without pickle."""
     return np.asarray(a).astype(str)
+
+
+@dataclass
+class ColumnTable:
+    """Optic-lobe column assignment of visual neurons (`column_assignment.csv.gz`, Codex 783).
+
+    One row per neuron of the 31 columnar types that were assigned to one of the ~796 ommatidial
+    columns per eye (Matsliah et al. 2024, doi:10.1038/s41586-024-07981-1). `(p, q)` are the hex
+    axial coordinates of the column on the eye's lattice (six neighbours at `(±1,0)`, `(0,±1)`,
+    `±(1,1)`); `(x, y)` are the file's derived offset coordinates (`y = p + q`, `x = floor((q-p)/2)`).
+    See `flychess.connectome.retina.hex_to_xy` for the regular cartesian embedding.
+    """
+
+    root_ids: np.ndarray      # (M,) int64 (NOT unique across hemispheres in general; unique in practice)
+    hemisphere: np.ndarray    # (M,) str: 'left' / 'right'
+    cell_type: np.ndarray     # (M,) str: R7, R8, L1, ..., Mi1, ...
+    column_id: np.ndarray     # (M,) int32, 1-based per hemisphere
+    p: np.ndarray             # (M,) int16 hex axial
+    q: np.ndarray             # (M,) int16 hex axial
+    x: np.ndarray             # (M,) int16
+    y: np.ndarray             # (M,) int16
+    source: dict = field(default_factory=dict)  # {'path', 'size', 'mtime'}
+
+    @property
+    def n(self) -> int:
+        return int(self.root_ids.shape[0])
+
+    @classmethod
+    def from_arrays(cls, root_ids, hemisphere, cell_type, column_id, p, q, x=None, y=None, source=None):
+        p = np.asarray(p, dtype=np.int16)
+        q = np.asarray(q, dtype=np.int16)
+        if x is None:
+            x = np.floor_divide(q.astype(np.int32) - p.astype(np.int32), 2)
+        if y is None:
+            y = p.astype(np.int32) + q.astype(np.int32)
+        return cls(
+            root_ids=np.asarray(root_ids, dtype=np.int64),
+            hemisphere=_ustr(hemisphere),
+            cell_type=_ustr(cell_type),
+            column_id=np.asarray(column_id, dtype=np.int32),
+            p=p, q=q, x=np.asarray(x, dtype=np.int16), y=np.asarray(y, dtype=np.int16),
+            source=dict(source or {}),
+        )
+
+    def types(self) -> list[str]:
+        return sorted(set(self.cell_type.tolist()))
+
+
+def load_column_assignment(data_dir: str | Path = paths.CONNECTOME_DIR) -> ColumnTable:
+    """Parse `column_assignment.csv.gz` (root_id, hemisphere, type, column_id, x, y, p, q).
+
+    Raises FileNotFoundError when the table is absent (the retina is then skipped by the graph builder).
+    """
+    path = Path(data_dir) / COLUMN_FILE if Path(data_dir).is_dir() else Path(data_dir)
+    if not path.exists():
+        raise FileNotFoundError(f"{path} missing - download {COLUMN_FILE} from the FlyWire Codex release "
+                                f"(snapshot 783) into {Path(data_dir)}")
+    df = _read_csv(path, dtype={"root_id": np.int64, "hemisphere": "string", "type": "string",
+                                "column_id": np.int32, "x": np.int16, "y": np.int16, "p": np.int16, "q": np.int16})
+    st = path.stat()
+    return ColumnTable.from_arrays(
+        df["root_id"].to_numpy(np.int64), df["hemisphere"].fillna("").to_numpy(dtype=str),
+        df["type"].fillna("").to_numpy(dtype=str), df["column_id"].to_numpy(np.int32),
+        df["p"].to_numpy(np.int16), df["q"].to_numpy(np.int16), df["x"].to_numpy(np.int16), df["y"].to_numpy(np.int16),
+        source={"path": str(path), "size": st.st_size, "mtime": st.st_mtime},
+    )
 
 
 # ---- parsing helpers -------------------------------------------------------------------------------

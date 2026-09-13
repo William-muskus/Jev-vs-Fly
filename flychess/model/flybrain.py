@@ -2,17 +2,22 @@
 
 Every neuron of the :class:`BrainGraph` is a leaky rate unit; every synapse of the connectome is a
 weight whose *existence* and *sign* (Dale's law) are fixed and whose magnitude is learned. The board
-is injected into the sensory ``input_idx`` neurons on each timestep and the move / value heads read
-the final activity of the ``output_idx`` (descending & motor) neurons. There is no other pathway from
-board to move: the fly brain is the player.
+is injected each timestep into the sensory ``input_idx`` neurons (dense ``w_in``) and/or into the
+photoreceptors of the graph's retina (``retina_idx``: each looks at one board square through
+``w_ret``), and the move / value heads read the activity of the ``output_idx`` (descending & motor)
+neurons at the readout timesteps (optionally plus a linear summary of the ``central`` neurons).
+There is no other pathway from board to move: the fly brain is the player.
 
 Dynamics (``h`` is kept neuron-major ``(n, B)`` internally, batch-first at the module boundary)::
 
     h_0 = 0
     for t in range(steps):
-        pre        = W @ h_t + bias ;  pre[input_idx] += x @ w_in.T + b_in
-        h_{t+1}    = (1 - a) * h_t + a * act(pre)          # a = sigmoid(leak_logit), per neuron
-    policy_logits = policy_head(h_T[output_idx]) ;  value = tanh(value_head(h_T[output_idx]))
+        ion  = W_ion @ h_t                                  # ionotropic synapses (all of them without neuromod)
+        pre  = ion * (1 + tanh(W_mod @ h_t))  [neuromod]    # DA / SER / OCT synapses gate multiplicatively
+        pre += bias ; pre[input_idx] += x @ w_in.T + b_in ; pre[retina_idx[k]] += w_ret[k] . planes[:, sq_k] + b_ret[k]
+        h_{t+1} = (1 - a) * h_t + a * act(pre)              # a = sigmoid(leak_logit), per neuron
+    feat  = concat_{t in readout_steps} h_t[output_idx]  (+ central_proj(h_T[central_idx]))
+    policy_logits = policy_head(feat) ;  value = tanh(value_head(feat))
 """
 from __future__ import annotations
 
@@ -22,6 +27,7 @@ import warnings
 from collections.abc import Mapping
 from typing import Any
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
@@ -29,10 +35,12 @@ from torch.utils.checkpoint import checkpoint
 
 from flychess.connectome.graph import BrainGraph
 from flychess.model.config import BrainConfig
-from flychess.model.spmm import SparseStructure
+from flychess.model.spmm import SparseStructure, subset_csr
 
 _DTYPES = {"float32": torch.float32, "bfloat16": torch.bfloat16, "float16": torch.float16, "float64": torch.float64}
 _MIN_MAGNITUDE = 1e-6  # |w| floor before inverse_softplus (log1p(syn_count) is > 0 anyway)
+MODULATORY_NT: tuple[str, ...] = ("DA", "SER", "OCT")   # presynaptic transmitters whose synapses gate (neuromod)
+NUM_SQUARES = 64
 
 
 def inverse_softplus(x: Tensor) -> Tensor:
@@ -106,25 +114,78 @@ def activation_module(name: str, sat: float = 10.0) -> nn.Module:
     raise ValueError(f"unknown activation {name!r}")
 
 
-def _update_relu(h: Tensor, pre: Tensor, bias: Tensor, a: Tensor) -> Tensor:
-    return torch.lerp(h, torch.relu(pre + bias), a)
+def _act_plain(name: str, sat: float):
+    """Plain (compilable) elementwise activation used inside the fused update functions."""
+    if name == "relu":
+        return torch.relu
+    if name == "tanh":
+        return torch.tanh
+    if name == "gelu":
+        return _gelu_tanh
+    inv, s = 1.0 / float(sat), float(sat)
+    return lambda z: torch.tanh(torch.relu(z) * inv) * s
 
 
-def _update_tanh(h: Tensor, pre: Tensor, bias: Tensor, a: Tensor) -> Tensor:
-    return torch.lerp(h, torch.tanh(pre + bias), a)
+def _make_update(name: str, sat: float):
+    act = _act_plain(name, sat)
+
+    def _update(h: Tensor, pre: Tensor, bias: Tensor, a: Tensor) -> Tensor:
+        return torch.lerp(h, act(pre + bias), a)
+
+    return _update
 
 
-def _update_gelu(h: Tensor, pre: Tensor, bias: Tensor, a: Tensor) -> Tensor:
-    return torch.lerp(h, F.gelu(pre + bias, approximate="tanh"), a)
+class _GateRowsFn(torch.autograd.Function):
+    """``pre[rows] *= 1 + tanh(mod)`` IN PLACE on the (n, B) pre-activation (``mod: (len(rows), B)``).
+
+    The neuromodulatory gate only touches the rows that receive DA/SER/OCT synapses; doing it in place
+    on the SpMM output (which SpMM does not save) costs one small gather/scatter instead of several
+    full (n, B) passes, and the backward saves only the two ``(rows, B)`` tensors it needs.
+    """
+
+    @staticmethod
+    def forward(ctx, pre: Tensor, mod: Tensor, rows: Tensor) -> Tensor:
+        y = torch.tanh(mod)
+        ion_rows = pre.index_select(0, rows)
+        pre.index_copy_(0, rows, ion_rows * (1.0 + y))
+        ctx.save_for_backward(ion_rows, y, rows)
+        ctx.mark_dirty(pre)
+        return pre
+
+    @staticmethod
+    def backward(ctx, g: Tensor):
+        ion_rows, y, rows = ctx.saved_tensors
+        g_rows = g.index_select(0, rows)
+        d_mod = g_rows * ion_rows * (1.0 - y * y)
+        g_pre = g.index_copy(0, rows, g_rows * (1.0 + y))
+        return g_pre, d_mod, None
 
 
-def _make_update_satrelu(sat: float):
-    inv = 1.0 / float(sat)
+def modulatory_edge_mask(graph: BrainGraph) -> np.ndarray | None:
+    """Boolean ``(nnz,)`` mask of the synapses whose PRE-synaptic neuron releases DA / SER / OCT
+    (``graph.nt_type``, canonical edge order), or ``None`` when the graph carries no ``nt_type``."""
+    nt = getattr(graph, "nt_type", None)
+    if nt is None or np.size(nt) != int(graph.n):
+        return None
+    return np.isin(np.asarray(nt).astype(str)[np.asarray(graph.csr_indices)], MODULATORY_NT)
 
-    def _update_satrelu(h: Tensor, pre: Tensor, bias: Tensor, a: Tensor) -> Tensor:
-        return torch.lerp(h, torch.tanh(torch.relu(pre + bias) * inv) * float(sat), a)
 
-    return _update_satrelu
+def retina_slots(retina_square: np.ndarray) -> tuple[np.ndarray, int]:
+    """Group the photoreceptors by board square for a batched matmul.
+
+    Returns ``(slot, max_k)``: photoreceptor ``k`` sits at row ``slot[k] = square * max_k + j`` of a
+    ``(64 * max_k, NUM_PLANES)`` padded weight matrix, ``j`` being its rank among the photoreceptors
+    of the same square and ``max_k`` the largest number of photoreceptors on one square.
+    """
+    sq = np.asarray(retina_square).astype(np.int64)
+    if sq.size == 0:
+        return np.zeros(0, dtype=np.int64), 0
+    order = np.argsort(sq, kind="stable")
+    counts = np.bincount(sq, minlength=NUM_SQUARES)
+    starts = np.concatenate([[0], np.cumsum(counts)])
+    slot = np.empty(sq.size, dtype=np.int64)
+    slot[order] = np.arange(sq.size) - starts[sq[order]]
+    return sq * int(counts.max()) + slot, int(counts.max())
 
 
 def compute_ordering(graph: BrainGraph):
@@ -139,7 +200,6 @@ def compute_ordering(graph: BrainGraph):
     if os.environ.get("FLYCHESS_REORDER", "1") == "0" or graph.nnz == 0:
         return None, None, None
     try:
-        import numpy as np
         import scipy.sparse as sp
         from scipy.sparse.csgraph import reverse_cuthill_mckee
     except ImportError:  # pragma: no cover
@@ -150,12 +210,7 @@ def compute_ordering(graph: BrainGraph):
     mp = m[perm][:, perm].tocsr()
     mp.sort_indices()
     edge_perm = np.asarray(mp.data, dtype=np.int64) - 1
-    ordered = type(graph)(  # a BrainGraph in compute order (only the CSR fields matter here)
-        n=n, root_ids=graph.root_ids[perm], csr_indptr=mp.indptr.astype(np.int32), csr_indices=mp.indices.astype(np.int32),
-        syn_count=graph.syn_count[edge_perm], sign=graph.sign[edge_perm], input_idx=graph.input_idx,
-        output_idx=graph.output_idx, super_class=graph.super_class[perm], position=graph.position[perm], meta={},
-    )
-    return perm, edge_perm, SparseStructure(ordered, device="cpu")
+    return perm, edge_perm, SparseStructure.from_csr(mp.indptr.astype(np.int32), mp.indices.astype(np.int32), n)
 
 
 _COMPILED: dict[tuple[str, float], Any] = {}
@@ -166,10 +221,7 @@ def _compiled_update(activation: str, sat: float):
     size (training, evaluation, MCTS leaves) reuses the same kernels."""
     key = (activation, float(sat) if activation == "satrelu" else 0.0)
     if key not in _COMPILED:
-        fn = {"relu": _update_relu, "tanh": _update_tanh, "gelu": _update_gelu}.get(activation)
-        if fn is None:
-            fn = _make_update_satrelu(sat)
-        _COMPILED[key] = torch.compile(fn, dynamic=True)
+        _COMPILED[key] = torch.compile(_make_update(activation, sat), dynamic=True)
     return _COMPILED[key]
 
 
@@ -178,22 +230,35 @@ class FlyBrain(nn.Module):
 
     Parameters
     ----------
-    syn_gain (nnz,)          synapse magnitude logits; ``w = sign * softplus(syn_gain)`` (dale=True)
-                             or ``w = syn_gain`` (dale=False).
+    syn_gain (nnz,)          synapse magnitude logits over ALL synapses in canonical graph order;
+                             ``w = sign * softplus(syn_gain)`` (dale=True) or ``w = syn_gain`` (dale=False).
+                             With ``neuromod`` the DA/SER/OCT synapses are always ``softplus(syn_gain)`` (positive
+                             gains, whatever ``dale`` says) — the split is a fixed index partition of this one
+                             parameter, so checkpoints and exports do not depend on it.
     bias (n,)                per-neuron bias, init 0.
     leak_logit (n,)          per-neuron leak logit, init ``logit(alpha)``.
-    w_in (n_in, input_dim), b_in (n_in,)   board projection into the sensory neurons.
-    policy_head              ``Linear(n_out, num_moves)``.
-    value_head               ``Linear(n_out, value_hidden) → act → Linear(value_hidden, 1)`` (or ``Linear(n_out, 1)``),
+    w_in (n_in, input_dim), b_in (n_in,)   board projection into the sensory neurons (``sensory_input``;
+                             absent — not created, not saved — when ``sensory_input=False``).
+    w_ret (n_ret, num_planes), b_ret (n_ret,)  per-photoreceptor plane weights (``vision``); photoreceptor
+                             ``k`` receives ``w_ret[k] . planes[:, retina_square[k]] + b_ret[k]``.
+                             Init ``N(0, 1/sqrt(num_planes))`` / 0.
+    central_proj             ``Linear(n_central, central_dim)`` on the final activity of the ``central``
+                             neurons (``central_dim > 0``), concatenated to the head input.
+    policy_head              ``Linear(head_in, num_moves)`` with ``head_in = n_out * len(readout_steps) + central_dim``.
+    value_head               ``Linear(head_in, value_hidden) → act → Linear(value_hidden, 1)`` (or ``Linear(head_in, 1)``),
                              followed by ``tanh``. ``act`` is the *same* non-linearity as the recurrence
                              (``config.activation``); the export records it as ``header['value_activation']``
                              so the JS/numpy engines never have to guess it.
     ``syn_gain``, ``bias`` and ``leak_logit`` are always float32 regardless of ``config.dtype`` (which
-    only sets the dtype of ``w_in``/``b_in`` and the heads): under bf16 their optimiser steps would be
-    smaller than an ulp and the connectome would never learn.
+    only sets the dtype of ``w_in``/``b_in``/``w_ret``/``b_ret`` and the heads): under bf16 their
+    optimiser steps would be smaller than an ulp and the connectome would never learn.
     Buffers: ``sign (nnz,) float``, ``input_idx (n_in,) int64``, ``output_idx (n_out,) int64``,
-    ``syn_count (nnz,) float``; plus the non-persistent CSR pattern (``csr_indptr``, ``csr_indices``,
-    ``crow_t``, ``col_t``, ``perm_t``) which is fully determined by the graph.
+    ``syn_count (nnz,) float`` (persistent); plus the non-persistent, graph-determined index data: the
+    canonical CSR pattern (``csr_indptr``, ``csr_indices``, ``crow_t``, ``col_t``, ``perm_t``), the
+    compute-order copies (``c_*``, ``node_perm``, ``node_inv``, ``edge_perm``), the ionotropic /
+    modulatory split (``ion_*``, ``mod_*``, ``modr_*`` + ``mod_rows``/``mod_cols``, ``ion_edges``, ``mod_edges``,
+    ``mod_mask``), the retina
+    (``retina_idx``, ``retina_square``, ``ret_slot``) and ``central_idx``.
     """
 
     def __init__(self, graph: BrainGraph, config: BrainConfig) -> None:
@@ -209,6 +274,9 @@ class FlyBrain(nn.Module):
         self.fused = os.environ.get("FLYCHESS_FUSED", "1") != "0"   # torch.compile'd recurrent update on CUDA
         self._update_fn = None
         dtype = _DTYPES[config.dtype]
+        self.num_planes = int(config.input_dim // NUM_SQUARES)
+        self.readout_steps: tuple[int, ...] = tuple(config.effective_readout_steps)
+        self.sensory_input = bool(config.sensory_input)
 
         # ---- fixed connectome data (buffers) ----
         self.register_buffer("sign", torch.as_tensor(graph.sign, dtype=torch.float32))
@@ -230,16 +298,93 @@ class FlyBrain(nn.Module):
             self.register_buffer("edge_perm", torch.as_tensor(edge_perm, dtype=torch.int64), persistent=False)
             for name, tensor in compute.tensors().items():
                 self.register_buffer(f"c_{name}", tensor, persistent=False)
-        self._structure: SparseStructure | None = None
-        self._structure_device: torch.device | None = None
+        self._structures: dict[tuple[str, torch.device], SparseStructure] = {}
         # Recompute each recurrent step in backward instead of storing its activations: ~2x less
         # activation memory for ~+25 % time. Set by the trainer when batch size / VRAM demands it.
         self.grad_checkpoint: bool = False
 
+        # ---- neuromodulation: split the synapses by the presynaptic transmitter ----
+        self.neuromod = bool(config.neuromod)
+        self.nnz_mod = 0
+        if self.neuromod:
+            mask = modulatory_edge_mask(graph)
+            if mask is None:
+                warnings.warn("neuromod=True but the graph has no nt_type: no modulatory synapses (plain dynamics)")
+                mask = np.zeros(self.nnz, dtype=bool)
+            self.nnz_mod = int(mask.sum())
+            self.register_buffer("mod_mask", torch.as_tensor(mask), persistent=False)
+            # the loop's CSRs (compute order when reordered) split into ionotropic / modulatory sub-CSRs;
+            # ``ion_edges`` / ``mod_edges`` gather their values straight from the canonical ``w``
+            if self.reordered:
+                loop_indptr, loop_indices = _np(self.c_crow), _np(self.c_col)
+                loop_to_canonical, loop_mask = edge_perm, mask[edge_perm]
+            else:
+                loop_indptr, loop_indices = np.asarray(graph.csr_indptr), np.asarray(graph.csr_indices)
+                loop_to_canonical, loop_mask = np.arange(self.nnz, dtype=np.int64), mask
+            for kind, keep in (("ion", ~loop_mask), ("mod", loop_mask)):
+                indptr_s, indices_s, sel = subset_csr(loop_indptr, loop_indices, keep)
+                sub = SparseStructure.from_csr(indptr_s.astype(np.int32), indices_s.astype(np.int32), self.n)
+                for name, tensor in sub.tensors().items():
+                    self.register_buffer(f"{kind}_{name}", tensor, persistent=False)
+                self.register_buffer(f"{kind}_edges", torch.as_tensor(loop_to_canonical[sel], dtype=torch.int64),
+                                     persistent=False)
+            # The loop multiplies with the modulatory CSR compressed to the rows that receive any
+            # modulatory synapse (``mod_rows``, ~8 % of the neurons) and the columns that emit one
+            # (``mod_cols``, the DA/SER/OCT neurons, ~1 %): a cuSPARSE SpMM costs about as much as its
+            # output whatever its nnz (measured: the 25k-synapse full-size product cost as much as the
+            # 2.7M-synapse one), and the gate then only touches those rows.
+            counts = np.diff(indptr_s)                       # the last iteration was "mod"
+            mod_rows = np.flatnonzero(counts > 0)
+            mod_cols = np.unique(indices_s)
+            indptr_r = np.concatenate([[0], np.cumsum(counts[mod_rows])]).astype(np.int32)
+            col_r = np.searchsorted(mod_cols, indices_s).astype(np.int32)
+            compressed = SparseStructure.from_csr(indptr_r, col_r, int(mod_cols.size))
+            for name, tensor in compressed.tensors().items():
+                self.register_buffer(f"modr_{name}", tensor, persistent=False)
+            self.register_buffer("mod_rows", torch.as_tensor(mod_rows, dtype=torch.int64), persistent=False)
+            self.register_buffer("mod_cols", torch.as_tensor(mod_cols, dtype=torch.int64), persistent=False)
+            self.n_mod_rows, self.n_mod_cols = int(mod_rows.size), int(mod_cols.size)
+
+        # ---- retina (vision) ----
+        raw_ret = getattr(graph, "retina_idx", None)            # optional BrainGraph field (older npz: absent)
+        retina_idx = np.asarray(raw_ret if raw_ret is not None else np.zeros(0, np.int32)).astype(np.int64)
+        self.n_ret = int(retina_idx.size)
+        self.vision = bool(config.vision) and self.n_ret > 0
+        if bool(config.vision) and not self.vision:
+            # The graph builder silently produces no retina when column_assignment.csv.gz is missing:
+            # never let that turn into a network that trains for hours without seeing the board.
+            if not self.sensory_input:
+                raise ValueError("config.sensory_input=False needs a graph with a retina (graph.has_retina is "
+                                 "False): the board could not reach the network")
+            warnings.warn("config.vision=True but the graph has no retina (graph.has_retina is False): "
+                          "running with the dense sensory input (w_in) only")
+        if self.vision:
+            retina_square = np.asarray(graph.retina_square).astype(np.int64)
+            if retina_square.shape != (self.n_ret,) or retina_square.min() < 0 or retina_square.max() >= NUM_SQUARES:
+                raise ValueError("graph.retina_square must be (n_ret,) board squares in 0..63")
+            slot, max_k = retina_slots(retina_square)
+            self.ret_max_k = max_k
+            self.register_buffer("retina_idx", torch.as_tensor(retina_idx), persistent=False)
+            self.register_buffer("retina_square", torch.as_tensor(retina_square), persistent=False)
+            self.register_buffer("ret_slot", torch.as_tensor(slot), persistent=False)
+        else:
+            self.n_ret = 0
+
+        # ---- central summary features ----
+        self.central_dim = int(config.central_dim)
+        central_idx = np.flatnonzero(np.asarray(graph.super_class).astype(str) == "central").astype(np.int64)
+        self.n_central = int(central_idx.size) if self.central_dim > 0 else 0
+        if self.central_dim > 0:
+            if self.n_central == 0:
+                raise ValueError("central_dim > 0 but the graph has no 'central' neurons")
+            self.register_buffer("central_idx", torch.as_tensor(central_idx), persistent=False)
+        self.head_in = self.n_out * len(self.readout_steps) + self.central_dim
+
         # ---- learnable parameters ----
         init_gain = self.init_syn_gain(self.syn_count, self.csr_indptr, config.weight_init_scale)
         if not self.dale:
-            init_gain = self.sign * F.softplus(init_gain)  # free-sign weights start at the Dale init
+            free = self.sign * F.softplus(init_gain)  # free-sign weights start at the Dale init
+            init_gain = torch.where(self.mod_mask, init_gain, free) if self.neuromod else free
         # The recurrent parameters are always float32, whatever ``config.dtype`` says: the forward
         # upcasts them anyway (see ``effective_weights``/``leak``), and in bf16 the initial gains
         # (~ -2.5..-4.5, ulp ~ 0.016..0.03) would swallow every optimiser step (~ lr = 1e-3), silently
@@ -250,18 +395,26 @@ class FlyBrain(nn.Module):
         self.leak_logit = nn.Parameter(
             torch.full((self.n,), math.log(config.alpha / (1 - config.alpha)), dtype=torch.float32)
         )
-        self.w_in = nn.Parameter(torch.empty(self.n_in, config.input_dim, dtype=dtype))
-        self.b_in = nn.Parameter(torch.zeros(self.n_in, dtype=dtype))
-        nn.init.kaiming_uniform_(self.w_in, a=math.sqrt(5))
-        self.policy_head = nn.Linear(self.n_out, config.num_moves, dtype=dtype)
+        if self.sensory_input:   # a vision-only model has no w_in / b_in at all (nothing to train or save)
+            self.w_in = nn.Parameter(torch.empty(self.n_in, config.input_dim, dtype=dtype))
+            self.b_in = nn.Parameter(torch.zeros(self.n_in, dtype=dtype))
+            nn.init.kaiming_uniform_(self.w_in, a=math.sqrt(5))
+        self.policy_head = nn.Linear(self.head_in, config.num_moves, dtype=dtype)
         if config.value_hidden > 0:
             self.value_head = nn.Sequential(
-                nn.Linear(self.n_out, config.value_hidden, dtype=dtype),
+                nn.Linear(self.head_in, config.value_hidden, dtype=dtype),
                 activation_module(config.activation, config.sat),
                 nn.Linear(config.value_hidden, 1, dtype=dtype),
             )
         else:
-            self.value_head = nn.Linear(self.n_out, 1, dtype=dtype)
+            self.value_head = nn.Linear(self.head_in, 1, dtype=dtype)
+        # the optional parts draw their random init last, so a seeded model's w_in / heads do not depend
+        # on whether the graph has a retina or the config asks for central features
+        if self.vision:
+            self.w_ret = nn.Parameter(torch.randn(self.n_ret, self.num_planes, dtype=dtype) / math.sqrt(self.num_planes))
+            self.b_ret = nn.Parameter(torch.zeros(self.n_ret, dtype=dtype))
+        if self.central_dim > 0:
+            self.central_proj = nn.Linear(self.n_central, self.central_dim, dtype=dtype)
 
     # ---- initialisation ------------------------------------------------------------------------
     @staticmethod
@@ -282,32 +435,57 @@ class FlyBrain(nn.Module):
         return inverse_softplus(magnitude)
 
     # ---- structure -----------------------------------------------------------------------------
-    def structure(self) -> SparseStructure:
-        """The :class:`SparseStructure` view on the current device (rebuilt after ``.to(device)``)."""
+    def _structure_named(self, prefix: str) -> SparseStructure:
+        """CSR views ``<prefix>crow`` ... on the current device (rebuilt after ``.to(device)``)."""
         dev = self.csr_indices.device
-        if self._structure is None or self._structure_device != dev:
-            if self.reordered:
-                tensors = {"crow": self.c_crow, "col": self.c_col, "crow_t": self.c_crow_t,
-                           "col_t": self.c_col_t, "perm_t": self.c_perm_t}
-            else:
-                tensors = {"crow": self.csr_indptr, "col": self.csr_indices, "crow_t": self.crow_t,
-                           "col_t": self.col_t, "perm_t": self.perm_t}
-            self._structure = SparseStructure(tensors=tensors, n=self.n)
-            self._structure_device = dev
-        return self._structure
+        key = (prefix, dev)
+        if key not in self._structures:
+            names = {"crow": "csr_indptr", "col": "csr_indices"} if prefix == "" else {}
+            tensors = {k: getattr(self, names.get(k, f"{prefix}{k}"))
+                       for k in ("crow", "col", "crow_t", "col_t", "perm_t")}
+            n_cols = self.n_mod_cols if prefix == "modr_" else self.n
+            self._structures[key] = SparseStructure(tensors=tensors, n=n_cols)
+        return self._structures[key]
+
+    def structure(self) -> SparseStructure:
+        """The :class:`SparseStructure` the recurrent loop multiplies with: all synapses (compute order
+        when reordered), or only the ionotropic ones under ``neuromod``."""
+        if self.neuromod:
+            return self._structure_named("ion_")
+        return self._structure_named("c_" if self.reordered else "")
+
+    def mod_structure(self, compressed: bool = False) -> SparseStructure:
+        """The modulatory (DA/SER/OCT) sub-CSR in the loop's neuron order (``neuromod`` only): all ``n``
+        rows (export / reference), or ``compressed=True`` for the ``(n_mod_rows, n_mod_cols)`` version
+        the loop uses (row ``i`` = neuron ``mod_rows[i]``, column ``j`` = neuron ``mod_cols[j]``)."""
+        if not self.neuromod:
+            raise RuntimeError("mod_structure() needs config.neuromod=True")
+        return self._structure_named("modr_" if compressed else "mod_")
 
     def canonical_structure(self) -> SparseStructure:
         """CSR views in the graph's own neuron order (tests / reference computations)."""
-        return SparseStructure(tensors={"crow": self.csr_indptr, "col": self.csr_indices, "crow_t": self.crow_t,
-                                        "col_t": self.col_t, "perm_t": self.perm_t}, n=self.n)
+        return self._structure_named("")
 
     # ---- weights -------------------------------------------------------------------------------
     def effective_weights(self) -> Tensor:
-        """Signed synaptic weights ``w (nnz,)`` in float32, ordered like ``graph.csr_indices``."""
+        """Signed synaptic weights ``w (nnz,)`` in float32, ordered like ``graph.csr_indices``.
+
+        Under ``neuromod`` the modulatory synapses are ``softplus(syn_gain)`` (positive gains) even with
+        ``dale=False``; with ``dale=True`` that is what the sign rule (+1 for DA/SER/OCT) gives anyway."""
         gain = self.syn_gain.float()
         if self.dale:
             return self.sign * F.softplus(gain)
+        if self.neuromod:
+            return torch.where(self.mod_mask, F.softplus(gain), gain)
         return gain
+
+    def loop_weights(self) -> tuple[Tensor, Tensor | None]:
+        """``(w_ion, w_mod)`` as the recurrent loop consumes them (loop CSR order); ``w_mod`` is ``None``
+        without ``neuromod`` and ``w_ion`` then holds every synapse."""
+        w = self.effective_weights()
+        if self.neuromod:
+            return w[self.ion_edges], w[self.mod_edges]
+        return (w[self.edge_perm] if self.reordered else w), None
 
     def leak(self) -> Tensor:
         """Per-neuron leak ``a = sigmoid(leak_logit)`` in float32."""
@@ -319,16 +497,24 @@ class FlyBrain(nn.Module):
 
         After this the torch forward uses exactly the values the JS/numpy engines see, which is how
         the parity tests and ``export/testvectors.py`` obtain matching numbers. ``syn_gain`` is set to
-        ``inverse_softplus(|round_f16(w)|)`` (dale) or ``round_f16(w)`` (free sign).
+        ``inverse_softplus(|round_f16(w)|)`` (dale, and the modulatory synapses) or ``round_f16(w)``
+        (free sign).
         """
         w = self.effective_weights().half().float()
+        logit = inverse_softplus(torch.clamp(w.abs(), min=_MIN_MAGNITUDE))
         if self.dale:
-            self.syn_gain.copy_(inverse_softplus(torch.clamp(w.abs(), min=_MIN_MAGNITUDE)).to(self.syn_gain.dtype))
+            new = logit
+        elif self.neuromod:
+            new = torch.where(self.mod_mask, logit, w)
         else:
-            self.syn_gain.copy_(w.to(self.syn_gain.dtype))
+            new = w
+        self.syn_gain.copy_(new.to(self.syn_gain.dtype))
         for lin in self._dense_linears():
             lin.weight.copy_(lin.weight.half().to(lin.weight.dtype))
-        self.w_in.copy_(self.w_in.half().to(self.w_in.dtype))
+        if self.sensory_input:
+            self.w_in.copy_(self.w_in.half().to(self.w_in.dtype))
+        if self.vision:
+            self.w_ret.copy_(self.w_ret.half().to(self.w_ret.dtype))
         return self
 
     def _dense_linears(self) -> list[nn.Linear]:
@@ -337,51 +523,92 @@ class FlyBrain(nn.Module):
             lins += [m for m in self.value_head if isinstance(m, nn.Linear)]
         else:
             lins.append(self.value_head)
+        if self.central_dim > 0:
+            lins.append(self.central_proj)
         return lins
 
     # ---- forward -------------------------------------------------------------------------------
+    def retina_input(self, x: Tensor) -> Tensor:
+        """Photoreceptor drive ``(n_ret, B)``: ``w_ret[k] . planes[b, :, retina_square[k]] + b_ret[k]``.
+
+        Computed as one batched matmul per board square (photoreceptors grouped by square and padded to
+        ``ret_max_k`` per square, see :func:`retina_slots`) so that nothing of size ``B × planes × n_ret``
+        is ever materialised or saved for backward."""
+        B = x.shape[0]
+        w_pad = torch.zeros(NUM_SQUARES * self.ret_max_k, self.num_planes, dtype=self.w_ret.dtype, device=x.device)
+        w_pad = w_pad.index_put((self.ret_slot,), self.w_ret)                       # differentiable scatter
+        planes = x.to(self.w_ret.dtype).view(B, self.num_planes, NUM_SQUARES).permute(2, 0, 1)   # (64, B, P)
+        out = torch.bmm(planes, w_pad.view(NUM_SQUARES, self.ret_max_k, self.num_planes).transpose(1, 2))  # (64, B, k)
+        r = out.permute(0, 2, 1).reshape(NUM_SQUARES * self.ret_max_k, B).index_select(0, self.ret_slot)
+        return r.float() + self.b_ret.float().unsqueeze(1)
+
     def forward(self, x: Tensor, return_activity: bool = False) -> tuple[Tensor, Tensor] | tuple[Tensor, Tensor, Tensor]:
         """``x: (B, input_dim)`` → ``(policy_logits (B, num_moves), value (B, 1)[, h_T (B, n)])``.
 
         The recurrent part always runs in float32 (the SpMM upcasts); under autocast the dense
-        input projection and the heads may run in bf16.
+        input projections and the heads may run in bf16.
         """
         if x.dim() != 2 or x.shape[1] != self.config.input_dim:
             raise ValueError(f"expected x of shape (B, {self.config.input_dim}), got {tuple(x.shape)}")
         B = x.shape[0]
-        w = self.effective_weights()                             # (nnz,) fp32
+        w_ion, w_mod = self.loop_weights()                        # (nnz_ion,) [, (nnz_mod,)] fp32
         a = self.leak().unsqueeze(1)                              # (n, 1) fp32
         bias = self.bias.float().unsqueeze(1)                     # (n, 1)
-        h_in = F.linear(x.to(self.w_in.dtype), self.w_in, self.b_in).float().t().contiguous()  # (n_in, B)
+        h_in = r_in = None
+        if self.sensory_input:
+            h_in = F.linear(x.to(self.w_in.dtype), self.w_in, self.b_in).float().t().contiguous()  # (n_in, B)
+        if self.vision:
+            r_in = self.retina_input(x)                           # (n_ret, B)
         input_idx, output_idx = self.input_idx, self.output_idx
+        retina_idx = self.retina_idx if self.vision else None
+        central_idx = self.central_idx if self.central_dim > 0 else None
         if self.reordered:                                        # switch to the compute ordering
-            w, a, bias = w[self.edge_perm], a[self.node_perm], bias[self.node_perm]
+            a, bias = a[self.node_perm], bias[self.node_perm]
             input_idx, output_idx = self.node_inv[input_idx], self.node_inv[output_idx]
+            retina_idx = self.node_inv[retina_idx] if retina_idx is not None else None
+            central_idx = self.node_inv[central_idx] if central_idx is not None else None
+        if w_mod is not None and self.nnz_mod == 0:
+            w_mod = None                                          # neuromod on, but nothing modulatory here
 
         use_ckpt = self.grad_checkpoint and torch.is_grad_enabled()
         h = torch.zeros(self.n, B, dtype=torch.float32, device=x.device)
+        feats = []
         for t in range(self.steps):
             if use_ckpt and t > 0:
-                h = checkpoint(self._step, h, w, a, bias, h_in, input_idx, use_reentrant=False)
+                h = checkpoint(self._step, h, w_ion, w_mod, a, bias, h_in, r_in, input_idx, retina_idx,
+                               use_reentrant=False)
             else:
-                h = self._step(h, w, a, bias, h_in, input_idx, first=t == 0)
-
-        out = h.index_select(0, output_idx).t()                   # (B, n_out) fp32
-        out_dense = out.to(self.policy_head.weight.dtype)
-        policy_logits = self.policy_head(out_dense)
-        value = torch.tanh(self.value_head(out_dense).float())
+                h = self._step(h, w_ion, w_mod, a, bias, h_in, r_in, input_idx, retina_idx, first=t == 0)
+            if t + 1 in self.readout_steps:
+                feats.append(h.index_select(0, output_idx).t())   # (B, n_out) fp32
+        if central_idx is not None:
+            feats.append(self.central_proj(h.index_select(0, central_idx).t().to(self.central_proj.weight.dtype)).float())
+        feat = feats[0] if len(feats) == 1 else torch.cat(feats, dim=1)
+        feat_dense = feat.to(self.policy_head.weight.dtype)
+        policy_logits = self.policy_head(feat_dense)
+        value = torch.tanh(self.value_head(feat_dense).float())
         if return_activity:
             if self.reordered:
                 h = h.index_select(0, self.node_inv)              # back to the canonical neuron order
             return policy_logits, value, h.t()
         return policy_logits, value
 
-    def _step(self, h: Tensor, w: Tensor, a: Tensor, bias: Tensor, h_in: Tensor, input_idx: Tensor,
+    def _step(self, h: Tensor, w_ion: Tensor, w_mod: Tensor | None, a: Tensor, bias: Tensor,
+              h_in: Tensor | None, r_in: Tensor | None, input_idx: Tensor, retina_idx: Tensor | None,
               first: bool = False) -> Tensor:
-        """One recurrent timestep on the neuron-major state ``h: (n, B)`` (compute ordering)."""
-        # W @ h_0 is identically zero (h_0 = 0): skipping the SpMM on the first step changes nothing.
-        pre = torch.zeros_like(h) if first else self.structure().spmm(w, h)
-        pre = pre.index_add_(0, input_idx, h_in)                    # in-place: SpMM does not save its output
+        """One recurrent timestep on the neuron-major state ``h: (n, B)`` (loop ordering)."""
+        # W @ h_0 is identically zero (h_0 = 0): skipping the SpMMs on the first step changes nothing.
+        pre = torch.zeros_like(h) if first else self.structure().spmm(w_ion, h)
+        if w_mod is not None and not first:                         # pre[rows] *= 1 + tanh(W_mod @ h)[rows]
+            mod = self.mod_structure(compressed=True).spmm(w_mod, h.index_select(0, self.mod_cols))  # (rows, B)
+            pre = _GateRowsFn.apply(pre, mod, self.mod_rows)        # in place on the SpMM output
+        if h_in is not None:
+            pre = pre.index_add_(0, input_idx, h_in)                # in-place: SpMM does not save its output
+        if r_in is not None:
+            pre = pre.index_add_(0, retina_idx, r_in)
+        return self._apply_update(h, pre, bias, a)
+
+    def _apply_update(self, h: Tensor, pre: Tensor, bias: Tensor, a: Tensor) -> Tensor:
         update = self._fused_update()
         if update is not None:
             return update(h, pre, bias, a)
@@ -403,12 +630,51 @@ class FlyBrain(nn.Module):
         return self._update_fn
 
     # ---- convenience ---------------------------------------------------------------------------
+    def __getstate__(self) -> dict[str, Any]:
+        """Pickle without the per-process caches (compiled update kernels, device structure views)."""
+        state = dict(self.__dict__)
+        state.update(_update_fn=None, _structures={})
+        return state
+
     @classmethod
     def from_checkpoint(cls, state_dict: Mapping[str, Any], config: BrainConfig, graph: BrainGraph,
                         strict: bool = True) -> FlyBrain:
-        """Build a FlyBrain for ``graph``/``config`` and load ``state_dict`` into it."""
+        """Build a FlyBrain for ``graph``/``config`` and load ``state_dict`` into it.
+
+        A checkpoint written before the retina existed (no ``w_ret``) is loaded with ``vision=False``
+        (with a warning) even when the graph has since been rebuilt with a retina: the checkpoint's
+        weights never saw one, and the model's ``config`` then says so. (Only with ``sensory_input=True``:
+        a vision-only config has no other way in, so the strict load then fails as a config error.)
+        A vision-only model (``sensory_input=False``) ignores ``w_in`` / ``b_in`` found in the checkpoint.
+
+        ``input_idx`` / ``output_idx`` are persistent buffers, so the model plays with the CHECKPOINT's
+        sensory / motor sets even when the graph on disk has since been rebuilt with different ones
+        (e.g. inputs that became photoreceptors): a warning says so, and the export writes the
+        model's sets, never the graph's.
+        """
+        state_dict = dict(state_dict)
+        has_retina = getattr(graph, "retina_idx", None) is not None and np.size(graph.retina_idx) > 0
+        if config.vision and config.sensory_input and has_retina and "w_ret" not in state_dict:
+            warnings.warn("checkpoint has no retina parameters (w_ret): loading it with vision=False")
+            config = config.replace(vision=False)
+        if not config.sensory_input:
+            for name in ("w_in", "b_in"):
+                state_dict.pop(name, None)      # written by a sensory model (or an older vision-only one)
+        for name in ("input_idx", "output_idx"):
+            saved, current = state_dict.get(name), np.asarray(getattr(graph, name))
+            if saved is None:
+                continue
+            saved = _np(torch.as_tensor(saved)).reshape(-1)
+            if saved.size != current.size:
+                how = f"{saved.size} vs {current.size} neurons"
+            elif not np.array_equal(saved, current):
+                how = f"{np.setdiff1d(saved, current).size} of {saved.size} neurons are not in the graph's set"
+            else:
+                continue
+            warnings.warn(f"checkpoint {name} differs from the graph's ({how}): the model keeps the checkpoint's "
+                          "neurons, so its w_in / heads stay paired with the neurons they were trained on")
         model = cls(graph, config)
-        model.load_state_dict(dict(state_dict), strict=strict)
+        model.load_state_dict(state_dict, strict=strict)
         return model
 
     def count_parameters(self) -> dict[str, int]:
@@ -417,16 +683,26 @@ class FlyBrain(nn.Module):
             "syn_gain": self.syn_gain.numel(),
             "bias": self.bias.numel(),
             "leak_logit": self.leak_logit.numel(),
-            "input_proj": self.w_in.numel() + self.b_in.numel(),
             "policy_head": sum(p.numel() for p in self.policy_head.parameters()),
             "value_head": sum(p.numel() for p in self.value_head.parameters()),
         }
+        if self.sensory_input:
+            counts["input_proj"] = self.w_in.numel() + self.b_in.numel()
+        if self.vision:
+            counts["retina_proj"] = self.w_ret.numel() + self.b_ret.numel()
+        if self.central_dim > 0:
+            counts["central_proj"] = sum(p.numel() for p in self.central_proj.parameters())
         counts["total"] = sum(counts.values())
         return counts
 
     def extra_repr(self) -> str:
-        return (f"n={self.n}, nnz={self.nnz}, n_in={self.n_in}, n_out={self.n_out}, steps={self.steps}, "
-                f"activation={self.config.activation}, dale={self.dale}")
+        return (f"n={self.n}, nnz={self.nnz}, n_in={self.n_in}, n_out={self.n_out}, n_ret={self.n_ret}, "
+                f"steps={self.steps}, readout_steps={self.readout_steps}, activation={self.config.activation}, "
+                f"dale={self.dale}, neuromod={self.neuromod} (nnz_mod={self.nnz_mod}), central_dim={self.central_dim}")
+
+
+def _np(t: Tensor) -> np.ndarray:
+    return t.detach().cpu().numpy()
 
 
 # ---- loss helpers ------------------------------------------------------------------------------

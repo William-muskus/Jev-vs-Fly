@@ -11,22 +11,50 @@ from .graph import (
     neuron_nt_type,
     toy_graph,
 )
-from .load import Connectome, load_connectome, parse_connectome
+from .load import (
+    COLUMN_FILE,
+    ColumnTable,
+    Connectome,
+    load_column_assignment,
+    load_connectome,
+    parse_connectome,
+)
+from .retina import (
+    PARTNER_TYPES,
+    RETINA_TYPES,
+    EyeMap,
+    RetinaCandidates,
+    build_eye_map,
+    build_retina,
+    hex_to_xy,
+    retina_candidates,
+)
 
 __all__ = [
+    "COLUMN_FILE",
     "DEFAULT_FILES",
     "NT_SIGN",
+    "PARTNER_TYPES",
+    "RETINA_TYPES",
     "BrainGraph",
+    "ColumnTable",
     "Connectome",
+    "EyeMap",
     "GraphConfig",
+    "RetinaCandidates",
     "build_brain_graph",
+    "build_eye_map",
+    "build_retina",
     "download_connectome",
     "download_games",
     "edge_signs",
     "graph_path",
+    "hex_to_xy",
+    "load_column_assignment",
     "load_connectome",
     "load_or_build",
     "neuron_nt_type",
     "parse_connectome",
+    "retina_candidates",
     "toy_graph",
 ]
