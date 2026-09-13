@@ -303,12 +303,20 @@ board input and move read-out are new learned projections. `docs/SPEC.md §0` is
 the fly brain is the only thing that picks moves, in Python and in the browser, verified by the
 parity test.
 
-**How strong is it?** The reference run (`fly1`, whole brain, one epoch of imitation on 56.7M
-positions) predicts the move of a 1800+-rated human 32.3% of the time (top-3: 56.5%) on held-out
-games. With search (`superfly`) it beat a 1-ply material-greedy bot 10–0 and a random mover 8–0–2;
-the raw policy only draws most games against the material bot. It plays sensible openings and
-positional moves and blunders tactically — beatable by a club player, a real fight for a beginner.
-Measure your own run with `fly eval --run <name>` (random and 1-ply
+**How strong is it?** Two reference runs, both on the whole brain:
+
+| run | recipe | held-out top-1 / top-3 | notes |
+|---|---|---|---|
+| `fly1` | 8 timesteps, ReLU, 2014 data (57M positions), 1 epoch | 32.3% / 56.5% | first run; bf16 issue found and fixed mid-way |
+| `fly2` | 16 timesteps, saturating rectifier, 2014+2015 data (108M of 229M positions), fp32 | 31.8% / 55.4% | `configs/v2.yaml`, ~11 h with the fused/reordered kernels |
+
+On the raw move-prediction metric they are equal; **with search fly2 is far stronger**: `superfly`
+(200 MCTS simulations) vs `superfly` it beat fly1 **12–0**, and it beats the 1-ply material-greedy
+bot 9–1–0. The deeper, bounded network is not a better imitator, it is a better *thinker* — its value
+estimates and its policy on positions outside the human distribution make the tree search work.
+Search budget matters a lot: at 50 simulations fly2 loses 0–12 to fly1 at 200, so the browser tries to
+run as many simulations as the device allows. Without search (`fly`, `larva`) the two are equal: beatable
+by a club player, a real fight for a beginner. Measure your own run with `fly eval --run <name>` (random and 1-ply
 material opponents ship with the repo; add `--opponent stockfish:1` if a Stockfish binary is on your
 PATH). The dashboard tracks Elo over training. Expect it to beat a random mover comfortably after
 imitation and to lose to any real engine.
