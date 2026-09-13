@@ -281,7 +281,14 @@ demonstration built on their work.
   ascending neurons with the most outputs, the move is read from the 1,415 descending / motor neurons.
   A fly has no chess-board sensory organ; `W_in` is where most of the "chess" is learned.
 - **Data**: only rated Lichess games ≥ 1800 from 2014; the self-play stage is short by AlphaZero
-  standards (hours, not months).
+  standards (hours, not months). In the reference run 50 self-play iterations (64 games × 64 sims
+  each) improved the value head a lot (MSE 0.80 → 0.36) and the raw policy's results against a
+  random mover, but the search-based player got *weaker* (0–5 with 5 draws against the imitation
+  checkpoint with `superfly`) — with so few games it starts forgetting the human data. The shipped
+  brain is therefore the imitation checkpoint; larger `selfplay_games_per_iter`, a lower
+  `selfplay_lr` or mixing human positions into the replay buffer are the obvious next steps.
+- **Numerics**: keep `amp: false`. bf16 autocast on the dense parts silently degrades the loss once
+  recurrent activity grows (measured −8 points of top-1 on the same weights).
 - **Browser**: the full brain is a 30 MB download and ~35 ms per forward pass; superfly takes several
   seconds per move on a laptop.
 - **FlyWire data is CC BY-NC 4.0** — the exported brain and anything derived from it are for
@@ -296,7 +303,12 @@ board input and move read-out are new learned projections. `docs/SPEC.md §0` is
 the fly brain is the only thing that picks moves, in Python and in the browser, verified by the
 parity test.
 
-**How strong is it?** Weak. Measure your own run with `fly eval --run <name>` (random and 1-ply
+**How strong is it?** The reference run (`fly1`, whole brain, one epoch of imitation on 56.7M
+positions) predicts the move of a 1800+-rated human 32.3% of the time (top-3: 56.5%) on held-out
+games. With search (`superfly`) it beat a 1-ply material-greedy bot 10–0 and a random mover 8–0–2;
+the raw policy only draws most games against the material bot. It plays sensible openings and
+positional moves and blunders tactically — beatable by a club player, a real fight for a beginner.
+Measure your own run with `fly eval --run <name>` (random and 1-ply
 material opponents ship with the repo; add `--opponent stockfish:1` if a Stockfish binary is on your
 PATH). The dashboard tracks Elo over training. Expect it to beat a random mover comfortably after
 imitation and to lose to any real engine.

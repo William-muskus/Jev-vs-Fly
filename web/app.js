@@ -525,7 +525,7 @@ class App {
     this.board.highlight({ lastMove: null, check: null });
     $('screen-landing').hidden = true; $('screen-game').hidden = false;
     $('diff-pill').textContent = DIFF_LABEL[opts.difficulty];
-    $('clk-last').textContent = '—'; $('clk-total').textContent = '0.0 s'; $('clk-sims').textContent = opts.difficulty === 'superfly' ? '0/200' : '—';
+    $('clk-last').textContent = '—'; $('clk-total').textContent = '0.0 s'; $('clk-sims').textContent = opts.difficulty === 'superfly' ? '0/100' : '—';
     $('btn-resign').disabled = false;
     this.renderMoves();
     this.renderPartyBar();
