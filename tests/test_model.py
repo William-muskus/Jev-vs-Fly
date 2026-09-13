@@ -216,7 +216,7 @@ def test_forward_matches_manual_dense_dynamics(graph, config):
     m = FlyBrain(graph, config.replace(activation="tanh")).double()
     x = torch.randn(3, 1280, dtype=torch.float64)
     p, v, h_t = m(x, return_activity=True)
-    s = m.structure()
+    s = m.canonical_structure()
     W = s.dense(m.effective_weights().double())
     a = torch.sigmoid(m.leak_logit)
     inp = torch.zeros(3, graph.n, dtype=torch.float64)
@@ -368,3 +368,25 @@ def test_benchmark_full_brain(request, capsys):
         print(f"\n[bench] n={g.n:,} nnz={g.nnz:,} B={B} steps=8: fwd+bwd {dt * 1000:.1f} ms "
               f"({dt / 8 * 1000:.2f} ms/timestep), peak {peak:.2f} GB; inference B=1 {dt1 * 1000:.2f} ms")
     assert dt < 0.5 and peak < 8.0
+
+
+def test_compute_reordering_matches_canonical_order(graph, config, monkeypatch):
+    """The RCM compute ordering changes nothing observable: outputs, activity and gradients match."""
+    import flychess.model.flybrain as fb
+
+    torch.manual_seed(5)
+    m_re = FlyBrain(graph, config.replace(activation="satrelu"))
+    assert m_re.reordered
+    monkeypatch.setenv("FLYCHESS_REORDER", "0")
+    torch.manual_seed(5)
+    m_id = fb.FlyBrain(graph, config.replace(activation="satrelu"))
+    assert not m_id.reordered
+    m_id.load_state_dict(m_re.state_dict())  # persistent state is canonical in both
+    x = torch.randn(4, 1280)
+    p1, v1, h1 = m_re(x, return_activity=True)
+    p2, v2, h2 = m_id(x, return_activity=True)
+    assert torch.allclose(p1, p2, atol=1e-5) and torch.allclose(v1, v2, atol=1e-6) and torch.allclose(h1, h2, atol=1e-5)
+    (p1.sum() + v1.sum()).backward()
+    (p2.sum() + v2.sum()).backward()
+    for (n1, a), (n2, b) in zip(m_re.named_parameters(), m_id.named_parameters()):
+        assert n1 == n2 and torch.allclose(a.grad, b.grad, atol=1e-5, rtol=1e-4), n1

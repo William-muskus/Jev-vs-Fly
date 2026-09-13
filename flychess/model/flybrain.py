@@ -17,6 +17,8 @@ Dynamics (``h`` is kept neuron-major ``(n, B)`` internally, batch-first at the m
 from __future__ import annotations
 
 import math
+import os
+import warnings
 from collections.abc import Mapping
 from typing import Any
 
@@ -104,6 +106,73 @@ def activation_module(name: str, sat: float = 10.0) -> nn.Module:
     raise ValueError(f"unknown activation {name!r}")
 
 
+def _update_relu(h: Tensor, pre: Tensor, bias: Tensor, a: Tensor) -> Tensor:
+    return torch.lerp(h, torch.relu(pre + bias), a)
+
+
+def _update_tanh(h: Tensor, pre: Tensor, bias: Tensor, a: Tensor) -> Tensor:
+    return torch.lerp(h, torch.tanh(pre + bias), a)
+
+
+def _update_gelu(h: Tensor, pre: Tensor, bias: Tensor, a: Tensor) -> Tensor:
+    return torch.lerp(h, F.gelu(pre + bias, approximate="tanh"), a)
+
+
+def _make_update_satrelu(sat: float):
+    inv = 1.0 / float(sat)
+
+    def _update_satrelu(h: Tensor, pre: Tensor, bias: Tensor, a: Tensor) -> Tensor:
+        return torch.lerp(h, torch.tanh(torch.relu(pre + bias) * inv) * float(sat), a)
+
+    return _update_satrelu
+
+
+def compute_ordering(graph: BrainGraph):
+    """Reverse-Cuthill-McKee neuron permutation for the recurrent loop.
+
+    Returns ``(node_perm, edge_perm, structure)`` where ``node_perm[i]`` is the canonical index of the
+    i-th neuron in compute order, ``edge_perm`` maps compute-order CSR entries to canonical entries
+    (``values_c = values[edge_perm]``) and ``structure`` is the compute-order :class:`SparseStructure`
+    (CPU). ``(None, None, None)`` when disabled (``FLYCHESS_REORDER=0``) or scipy is unavailable.
+    Measured on the full brain: the three sparse kernels per timestep go from 7.6 ms to 5.7 ms.
+    """
+    if os.environ.get("FLYCHESS_REORDER", "1") == "0" or graph.nnz == 0:
+        return None, None, None
+    try:
+        import numpy as np
+        import scipy.sparse as sp
+        from scipy.sparse.csgraph import reverse_cuthill_mckee
+    except ImportError:  # pragma: no cover
+        return None, None, None
+    n = int(graph.n)
+    m = sp.csr_matrix((np.arange(graph.nnz, dtype=np.int64) + 1, graph.csr_indices, graph.csr_indptr), shape=(n, n))
+    perm = np.asarray(reverse_cuthill_mckee(m + m.T, symmetric_mode=True), dtype=np.int64)
+    mp = m[perm][:, perm].tocsr()
+    mp.sort_indices()
+    edge_perm = np.asarray(mp.data, dtype=np.int64) - 1
+    ordered = type(graph)(  # a BrainGraph in compute order (only the CSR fields matter here)
+        n=n, root_ids=graph.root_ids[perm], csr_indptr=mp.indptr.astype(np.int32), csr_indices=mp.indices.astype(np.int32),
+        syn_count=graph.syn_count[edge_perm], sign=graph.sign[edge_perm], input_idx=graph.input_idx,
+        output_idx=graph.output_idx, super_class=graph.super_class[perm], position=graph.position[perm], meta={},
+    )
+    return perm, edge_perm, SparseStructure(ordered, device="cpu")
+
+
+_COMPILED: dict[tuple[str, float], Any] = {}
+
+
+def _compiled_update(activation: str, sat: float):
+    """One ``torch.compile``d update function per (activation, sat); ``dynamic=True`` so that any batch
+    size (training, evaluation, MCTS leaves) reuses the same kernels."""
+    key = (activation, float(sat) if activation == "satrelu" else 0.0)
+    if key not in _COMPILED:
+        fn = {"relu": _update_relu, "tanh": _update_tanh, "gelu": _update_gelu}.get(activation)
+        if fn is None:
+            fn = _make_update_satrelu(sat)
+        _COMPILED[key] = torch.compile(fn, dynamic=True)
+    return _COMPILED[key]
+
+
 class FlyBrain(nn.Module):
     """Recurrent network on the fly connectome with policy and value heads.
 
@@ -137,6 +206,8 @@ class FlyBrain(nn.Module):
         self.steps = int(config.steps)
         self.dale = bool(config.dale)
         self.act = activation_fn(config.activation, config.sat)
+        self.fused = os.environ.get("FLYCHESS_FUSED", "1") != "0"   # torch.compile'd recurrent update on CUDA
+        self._update_fn = None
         dtype = _DTYPES[config.dtype]
 
         # ---- fixed connectome data (buffers) ----
@@ -147,6 +218,18 @@ class FlyBrain(nn.Module):
         structure = SparseStructure(graph, device="cpu")
         for name, tensor in structure.tensors().items():
             self.register_buffer({"crow": "csr_indptr", "col": "csr_indices"}.get(name, name), tensor, persistent=False)
+        # Cache-friendly compute ordering: the recurrent loop runs on a reverse-Cuthill-McKee permutation
+        # of the neurons (the sparse kernels gather one 1.5 KB state row per connection; neighbours
+        # that sit close in memory hit L2). Parameters, buffers, checkpoints and the export keep the
+        # canonical graph order — the permutation is applied on the way in and out of the loop only.
+        node_perm, edge_perm, compute = compute_ordering(graph)
+        self.reordered = node_perm is not None
+        if self.reordered:
+            self.register_buffer("node_perm", torch.as_tensor(node_perm, dtype=torch.int64), persistent=False)
+            self.register_buffer("node_inv", torch.argsort(self.node_perm), persistent=False)
+            self.register_buffer("edge_perm", torch.as_tensor(edge_perm, dtype=torch.int64), persistent=False)
+            for name, tensor in compute.tensors().items():
+                self.register_buffer(f"c_{name}", tensor, persistent=False)
         self._structure: SparseStructure | None = None
         self._structure_device: torch.device | None = None
         # Recompute each recurrent step in backward instead of storing its activations: ~2x less
@@ -203,13 +286,20 @@ class FlyBrain(nn.Module):
         """The :class:`SparseStructure` view on the current device (rebuilt after ``.to(device)``)."""
         dev = self.csr_indices.device
         if self._structure is None or self._structure_device != dev:
-            self._structure = SparseStructure(
-                tensors={"crow": self.csr_indptr, "col": self.csr_indices, "crow_t": self.crow_t,
-                         "col_t": self.col_t, "perm_t": self.perm_t},
-                n=self.n,
-            )
+            if self.reordered:
+                tensors = {"crow": self.c_crow, "col": self.c_col, "crow_t": self.c_crow_t,
+                           "col_t": self.c_col_t, "perm_t": self.c_perm_t}
+            else:
+                tensors = {"crow": self.csr_indptr, "col": self.csr_indices, "crow_t": self.crow_t,
+                           "col_t": self.col_t, "perm_t": self.perm_t}
+            self._structure = SparseStructure(tensors=tensors, n=self.n)
             self._structure_device = dev
         return self._structure
+
+    def canonical_structure(self) -> SparseStructure:
+        """CSR views in the graph's own neuron order (tests / reference computations)."""
+        return SparseStructure(tensors={"crow": self.csr_indptr, "col": self.csr_indices, "crow_t": self.crow_t,
+                                        "col_t": self.col_t, "perm_t": self.perm_t}, n=self.n)
 
     # ---- weights -------------------------------------------------------------------------------
     def effective_weights(self) -> Tensor:
@@ -263,29 +353,54 @@ class FlyBrain(nn.Module):
         a = self.leak().unsqueeze(1)                              # (n, 1) fp32
         bias = self.bias.float().unsqueeze(1)                     # (n, 1)
         h_in = F.linear(x.to(self.w_in.dtype), self.w_in, self.b_in).float().t().contiguous()  # (n_in, B)
+        input_idx, output_idx = self.input_idx, self.output_idx
+        if self.reordered:                                        # switch to the compute ordering
+            w, a, bias = w[self.edge_perm], a[self.node_perm], bias[self.node_perm]
+            input_idx, output_idx = self.node_inv[input_idx], self.node_inv[output_idx]
 
         use_ckpt = self.grad_checkpoint and torch.is_grad_enabled()
         h = torch.zeros(self.n, B, dtype=torch.float32, device=x.device)
         for t in range(self.steps):
             if use_ckpt and t > 0:
-                h = checkpoint(self._step, h, w, a, bias, h_in, use_reentrant=False)
+                h = checkpoint(self._step, h, w, a, bias, h_in, input_idx, use_reentrant=False)
             else:
-                h = self._step(h, w, a, bias, h_in, first=t == 0)
+                h = self._step(h, w, a, bias, h_in, input_idx, first=t == 0)
 
-        out = h.index_select(0, self.output_idx).t()              # (B, n_out) fp32
+        out = h.index_select(0, output_idx).t()                   # (B, n_out) fp32
         out_dense = out.to(self.policy_head.weight.dtype)
         policy_logits = self.policy_head(out_dense)
         value = torch.tanh(self.value_head(out_dense).float())
         if return_activity:
+            if self.reordered:
+                h = h.index_select(0, self.node_inv)              # back to the canonical neuron order
             return policy_logits, value, h.t()
         return policy_logits, value
 
-    def _step(self, h: Tensor, w: Tensor, a: Tensor, bias: Tensor, h_in: Tensor, first: bool = False) -> Tensor:
-        """One recurrent timestep on the neuron-major state ``h: (n, B)``."""
+    def _step(self, h: Tensor, w: Tensor, a: Tensor, bias: Tensor, h_in: Tensor, input_idx: Tensor,
+              first: bool = False) -> Tensor:
+        """One recurrent timestep on the neuron-major state ``h: (n, B)`` (compute ordering)."""
         # W @ h_0 is identically zero (h_0 = 0): skipping the SpMM on the first step changes nothing.
         pre = torch.zeros_like(h) if first else self.structure().spmm(w, h)
-        pre = pre.add_(bias).index_add_(0, self.input_idx, h_in)   # in-place: SpMM does not save its output
-        return torch.lerp(h, self.act(pre), a)                      # (1 - a) * h + a * act(pre), one kernel
+        pre = pre.index_add_(0, input_idx, h_in)                    # in-place: SpMM does not save its output
+        update = self._fused_update()
+        if update is not None:
+            return update(h, pre, bias, a)
+        return torch.lerp(h, self.act(pre + bias), a)                # (1 - a) * h + a * act(pre + bias)
+
+    def _fused_update(self):
+        """``torch.compile``d elementwise update (bias + activation + leak blend in ONE kernel, with a
+        fused backward). Eager PyTorch runs it as ~5 passes over the (n, B) state and saves every
+        intermediate; measured 7.5 ms per timestep at B=384 — more than the sparse matmul itself.
+        CUDA only; falls back to eager if compilation is unavailable. Same math, so checkpoints from
+        either path are interchangeable."""
+        if self._update_fn is not None or not self.fused or not torch.cuda.is_available():
+            return self._update_fn
+        try:
+            self._update_fn = _compiled_update(self.config.activation, self.config.sat)
+        except Exception as exc:  # pragma: no cover - depends on the local toolchain
+            warnings.warn(f"fused recurrent update unavailable ({exc}); using eager PyTorch")
+            self.fused = False
+        return self._update_fn
 
     # ---- convenience ---------------------------------------------------------------------------
     @classmethod

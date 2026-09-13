@@ -9,6 +9,7 @@ authors = [{ name = "Carlo Esposito", email = "carlo@aploi.de" }]
 dependencies = [
   "torch>=2.7",  # CUDA 12.8+ wheels: needed for Blackwell (sm_120) GPUs
   "numpy>=2.0",
+  "scipy>=1.14",
   "pandas>=2.2",
   "pyarrow>=17",
   "chess>=1.11",
