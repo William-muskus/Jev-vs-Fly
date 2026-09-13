@@ -134,13 +134,28 @@ def export_web(
         q, tag, scale = _quantise(arr, quant)
         add(name, q, tag, scale)
 
-    add("csr_indptr", graph.csr_indptr.astype(np.int32), "i32")
-    add("csr_indices", graph.csr_indices.astype(np.int32), "i32")
-    add_q("w", _t(model.effective_weights()))
-    add("bias", _t(model.bias).astype(np.float32), "f32")
-    add("alpha", _t(model.leak()).astype(np.float32), "f32")
-    add("input_idx", graph.input_idx.astype(np.int32), "i32")
-    add("output_idx", graph.output_idx.astype(np.int32), "i32")
+    # Neuron order of the blob: the model's cache-friendly compute ordering (reverse Cuthill-McKee)
+    # when available — the JS engine does the same gather-bound sparse products and gains the same
+    # locality. Every per-neuron / per-connection array below is permuted consistently, so the blob is
+    # self-contained; ``node_perm`` maps blob index -> canonical graph index for anyone who needs it.
+    if getattr(model, "reordered", False):
+        node_perm = _t(model.node_perm).astype(np.int64)
+        node_inv = _t(model.node_inv).astype(np.int64)
+        edge_perm = _t(model.edge_perm).astype(np.int64)
+        csr_indptr, csr_indices = _t(model.c_crow).astype(np.int32), _t(model.c_col).astype(np.int32)
+        neuron_order = "rcm"
+    else:
+        node_perm = np.arange(graph.n, dtype=np.int64)
+        node_inv, edge_perm = node_perm, np.arange(graph.nnz, dtype=np.int64)
+        csr_indptr, csr_indices = graph.csr_indptr.astype(np.int32), graph.csr_indices.astype(np.int32)
+        neuron_order = "canonical"
+    add("csr_indptr", csr_indptr, "i32")
+    add("csr_indices", csr_indices, "i32")
+    add_q("w", _t(model.effective_weights())[edge_perm])
+    add("bias", _t(model.bias).astype(np.float32)[node_perm], "f32")
+    add("alpha", _t(model.leak()).astype(np.float32)[node_perm], "f32")
+    add("input_idx", node_inv[graph.input_idx].astype(np.int32), "i32")
+    add("output_idx", node_inv[graph.output_idx].astype(np.int32), "i32")
     add_q("w_in", _t(model.w_in))
     add("b_in", _t(model.b_in).astype(np.float32), "f32")
     add_q("policy_w", _t(model.policy_head.weight))
@@ -156,8 +171,9 @@ def export_web(
         add_q("value_w", _t(model.value_head.weight))
         add("value_b", _t(model.value_head.bias).astype(np.float32), "f32")
         value_head = "linear"
-    add("positions", normalise_positions(graph.position).astype(np.float16), "f16")
-    add("super_class", super_class_codes(graph.super_class), "u8")
+    add("positions", normalise_positions(graph.position).astype(np.float16)[node_perm], "f16")
+    add("super_class", super_class_codes(graph.super_class)[node_perm], "u8")
+    add("node_perm", node_perm.astype(np.int32), "i32")
 
     # ---- lay out the blob ----
     entries: list[dict[str, Any]] = []
@@ -187,6 +203,7 @@ def export_web(
         "activation": cfg.activation,
         "gelu_approximate": "tanh",
         "activation_sat": float(cfg.sat),
+        "neuron_order": neuron_order,
         "value_head": value_head,
         # non-linearity between value_w and value_w2 (MLP head); the engines must read it from here
         "value_activation": cfg.activation,

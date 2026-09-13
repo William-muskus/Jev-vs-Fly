@@ -18,11 +18,11 @@ from flychess.export.web import normalise_positions
 from flychess.model import BrainConfig, FlyBrain
 
 EXPECTED_ORDER = ["csr_indptr", "csr_indices", "w", "bias", "alpha", "input_idx", "output_idx", "w_in", "b_in",
-                  "policy_w", "policy_b", "value_w", "value_b", "value_w2", "value_b2", "positions", "super_class"]
+                  "policy_w", "policy_b", "value_w", "value_b", "value_w2", "value_b2", "positions", "super_class", "node_perm"]
 EXPECTED_DTYPES = {"csr_indptr": "i32", "csr_indices": "i32", "w": "f16", "bias": "f32", "alpha": "f32",
                    "input_idx": "i32", "output_idx": "i32", "w_in": "f16", "b_in": "f32", "policy_w": "f16",
                    "policy_b": "f32", "value_w": "f16", "value_b": "f32", "value_w2": "f16", "value_b2": "f32",
-                   "positions": "f16", "super_class": "u8"}
+                   "positions": "f16", "super_class": "u8", "node_perm": "i32"}
 
 
 @pytest.fixture(scope="module")
@@ -79,24 +79,31 @@ def test_export_roundtrip_header_and_layout(model, graph, tmp_path):
 
     arrays, header2 = read_flyb(tmp_path)
     assert header2 == header
-    assert np.array_equal(arrays["csr_indptr"], graph.csr_indptr)
-    assert np.array_equal(arrays["csr_indices"], graph.csr_indices)
-    assert np.array_equal(arrays["input_idx"], graph.input_idx)
-    assert np.array_equal(arrays["output_idx"], graph.output_idx)
+    # the blob is in compute (RCM) order: mapping it back through node_perm must give the canonical graph
+    perm = arrays["node_perm"].astype(np.int64)
+    assert header["neuron_order"] == "rcm" and sorted(perm.tolist()) == list(range(graph.n))
+    inv = np.argsort(perm)
+    assert np.array_equal(np.sort(inv[graph.input_idx]), np.sort(arrays["input_idx"]))
+    assert np.array_equal(np.sort(inv[graph.output_idx]), np.sort(arrays["output_idx"]))
+    rows = np.repeat(np.arange(graph.n), np.diff(arrays["csr_indptr"]))
+    edges_blob = set(zip(perm[rows].tolist(), perm[arrays["csr_indices"]].tolist()))          # (post, pre) canonical
+    rows_g = np.repeat(np.arange(graph.n), np.diff(graph.csr_indptr))
+    assert edges_blob == set(zip(rows_g.tolist(), graph.csr_indices.tolist()))
     assert arrays["w"].dtype == np.float16 and arrays["w"].shape == (graph.nnz,)
-    assert np.allclose(arrays["w"].astype(np.float32), model.effective_weights().detach().numpy(), atol=1e-2)
-    assert np.allclose(arrays["alpha"], torch.sigmoid(model.leak_logit).detach().numpy())
+    edge_perm = model.edge_perm.numpy()
+    assert np.allclose(arrays["w"].astype(np.float32), model.effective_weights().detach().numpy()[edge_perm], atol=1e-2)
+    assert np.allclose(arrays["alpha"], torch.sigmoid(model.leak_logit).detach().numpy()[perm])
     # sign of the exported w is the connectome sign
-    assert np.array_equal(np.sign(arrays["w"].astype(np.float32)), graph.sign)
-    # positions in [0,1], NaN -> 0.5
+    assert np.array_equal(np.sign(arrays["w"].astype(np.float32)), graph.sign[edge_perm])
+    # positions in [0,1], NaN -> 0.5 (graph neuron 3 has NaN positions)
     pos = arrays["positions"].astype(np.float32)
-    assert pos.min() >= 0 and pos.max() <= 1 and np.allclose(pos[3], 0.5)
+    assert pos.min() >= 0 and pos.max() <= 1 and np.allclose(pos[inv[3]], 0.5)
     # super_class legend
     legend = header["super_class_legend"]
     assert legend == list(SUPER_CLASS_LEGEND)
     sc = arrays["super_class"]
-    assert legend[sc[0]] == "central" and legend[sc[100]] == "descending" and legend[sc[120]] == "sensory"
-    assert legend[sc[-1]] == "unknown"
+    assert legend[sc[inv[0]]] == "central" and legend[sc[inv[100]]] == "descending" and legend[sc[inv[120]]] == "sensory"
+    assert legend[sc[inv[graph.n - 1]]] == "unknown"
 
 
 def test_numpy_forward_matches_torch(model, graph, tmp_path):
@@ -113,7 +120,8 @@ def test_numpy_forward_matches_torch(model, graph, tmp_path):
         assert policy.shape == (96,) and h.shape == (graph.n,)
         assert np.allclose(policy, p_t[0].numpy(), atol=1e-2), np.abs(policy - p_t[0].numpy()).max()
         assert abs(value - float(v_t[0, 0])) < 1e-2
-        assert np.allclose(h, h_t[0].numpy(), atol=1e-3)
+        # the blob is in the model's compute (RCM) order; node_perm maps blob index -> canonical index
+        assert np.allclose(h, h_t[0].numpy()[arrays["node_perm"]], atol=1e-3)
         assert np.abs(h).max() > 0  # the brain actually responded
 
 

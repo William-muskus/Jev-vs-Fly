@@ -295,7 +295,10 @@ for each array, in this order: `csr_indptr (i32)`, `csr_indices (i32)`, `w (f16,
 `bias (f32)`, `alpha (f32, = sigmoid(leak_logit))`, `input_idx (i32)`, `output_idx (i32)`, `w_in (f16, [n_in,1280])`,
 `b_in (f32)`, `policy_w (f16, [num_moves, n_out])`, `policy_b (f32)`, `value_w (f16, [1 or hidden, n_out])`, `value_b`,
 (if MLP value head, also `value_w2`, `value_b2`), plus `positions (f16, [n,3])` normalised to [0,1] for the brain visualiser,
-and `super_class (u8, [n])` with a legend in the header. Header also has `steps, activation, n, nnz, n_in, n_out, num_moves,
+and `super_class (u8, [n])` with a legend in the header, then `node_perm (i32, [n])`. The blob's neuron order is the
+model's cache-friendly compute ordering (`header.neuron_order = 'rcm'`, reverse Cuthill-McKee; every per-neuron and
+per-connection array is permuted consistently, so the blob is self-contained); `node_perm[i]` is the canonical graph
+index of blob neuron `i`. Header also has `steps, activation, n, nnz, n_in, n_out, num_moves,
 num_planes, run_name, train_steps, exported_at, elo_estimates, total_bytes, gzip_bytes, blob_sha256`; the loader verifies every
 downloaded (and every cached) blob against `total_bytes` / `blob_sha256` and versions blob URLs by the header so a stale HTTP cache
 can never pair a new header with old bytes.
