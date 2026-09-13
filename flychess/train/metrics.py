@@ -81,14 +81,16 @@ class MetricsLogger:
         self._file = open(self.metrics_path, "a", encoding="utf-8")  # noqa: SIM115 - long-lived handle
 
     # ---- core --------------------------------------------------------------------------------
-    def log(self, kind: str, step: int, **fields: Any) -> dict | None:
-        """Append one record. Returns the record written, or ``None`` if it was rate limited."""
+    def log(self, kind: str, step: int, *, force: bool = False, **fields: Any) -> dict | None:
+        """Append one record. Returns the record written, or ``None`` if it was rate limited (``force`` writes it
+        regardless of the limit and restarts the interval)."""
         now = time.time()
         limit = self.rate_limits.get(kind)
-        if limit is not None:
+        if limit is not None and not force:
             last = self._last_write.get(kind)
             if last is not None and now - last < limit:
                 return None
+        if limit is not None:
             self._last_write[kind] = now
         record = {"t": now, "step": int(step), "kind": kind, **fields}
         self._file.write(dumps(record) + "\n")
@@ -134,9 +136,11 @@ class MetricsLogger:
             elo_estimate=elo_estimate, **extra,
         )
 
-    def log_game(self, step: int, *, pgn: str, result: str, moves: int, source: str, **extra: Any) -> bool:
-        """Sample game (≤ 1 per minute). Returns ``True`` if written."""
-        return self.log("game", step, pgn=pgn, result=result, moves=moves, source=source, **extra) is not None
+    def log_game(self, step: int, *, pgn: str, result: str, moves: int, source: str, force: bool = False,
+                 **extra: Any) -> bool:
+        """Sample game (≤ 1 per minute unless ``force``). Returns ``True`` if written."""
+        return self.log("game", step, pgn=pgn, result=result, moves=moves, source=source, force=force,
+                        **extra) is not None
 
     def log_activity(self, step: int, *, neuron_idx: Iterable[int], values: Iterable[float], **extra: Any) -> bool:
         """Sampled neuron activity (≤ 1 per 30 s). Returns ``True`` if written."""

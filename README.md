@@ -294,8 +294,11 @@ demonstration built on their work.
   each) improved the value head a lot (MSE 0.80 → 0.36) and the raw policy's results against a
   random mover, but the search-based player got *weaker* (0–5 with 5 draws against the imitation
   checkpoint with `superfly`) — with so few games it starts forgetting the human data. The shipped
-  brain is therefore the imitation checkpoint; larger `selfplay_games_per_iter`, a lower
-  `selfplay_lr` or mixing human positions into the replay buffer are the obvious next steps.
+  brain is therefore the imitation checkpoint. Self-play v2 (`docs/SPEC.md` §6) addresses exactly that:
+  512 games × 100 simulations per iteration, every training batch half human/engine positions streamed
+  from the shards, a blended value target, and a `superfly` gate that only promotes a candidate that
+  beats the current best (`runs/<run>/best.pt`); a rejected candidate takes its optimizer moments with
+  it, and a gate that cannot run rejects the candidate and stops the run rather than promoting it untested.
 - **Numerics**: keep `amp: false`. bf16 autocast on the dense parts silently degrades the loss once
   recurrent activity grows (measured −8 points of top-1 on the same weights).
 - **Browser**: the full brain is a 30 MB download and ~35 ms per forward pass; superfly takes several

@@ -48,7 +48,9 @@ dirichlet_eps: 0.25
 replay_buffer_size: 1000
 selfplay_batch_size: 16
 selfplay_train_steps_per_iter: 4
-selfplay_lr: 0.0002
+selfplay_lr: 0.0001
 max_game_plies: 40
 selfplay_workers: 1
-selfplay_eval_every_iters: 1      # Elo vs previous iteration & random every N iterations (always on the last)
+selfplay_eval_every_iters: 1      # Elo vs random (and vs the previous iteration without a gate) every N iterations
+selfplay_gate_games: 2            # gate match (candidate vs best with superfly) kept tiny; the other v2 keys use the defaults
+selfplay_gate_sims: 4

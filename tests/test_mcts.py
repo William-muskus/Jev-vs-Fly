@@ -48,6 +48,7 @@ def _config(**over):
         selfplay_lr=2e-4, selfplay_iters=1, selfplay_games_per_iter=2, selfplay_workers=1, value_loss_weight=1.0,
         grad_clip=1.0, amp=False, log_every=1, elo_every=3, elo_games=2, weight_decay=1e-4,
         selfplay_eval_every_iters=1,
+        selfplay_human_mix=0.0, selfplay_gate=False,  # v1 semantics (no shards here); v2 is tested in test_selfplay_v2.py
     )
     base.update(over)
     try:  # use the real TrainConfig when the trainer module exists

@@ -304,19 +304,79 @@ Internally keep the hidden state as `(n, B)` (neuron-major) for cuSPARSE; expose
 
 `fly train --run <name> [--stage imitation|selfplay|all] [--config cfg.yaml] [--resume]`.
 `TrainConfig` (yaml): graph selection, BrainConfig, `batch_size=256`, `lr=1e-3` (AdamW, cosine schedule with
-warmup), `epochs`, `value_loss_weight=1.0`, `grad_clip=1.0`, `amp=True` (bf16 autocast for the dense parts only;
-SpMM stays fp32), `eval_every`, `checkpoint_every`, self-play settings (`games_per_iter`, `mcts_sims=64`,
-`temperature`, `dirichlet_alpha`, `replay_buffer_size`), `seed`.
+warmup), `epochs`, `value_loss_weight=1.0`, `grad_clip=1.0`, `amp=false` (bf16 autocast for the dense parts only;
+SpMM stays fp32 — keep it off, see README), `eval_every`, `checkpoint_every`, the self-play settings of stage 2
+(below), `seed`.
 
 Checkpoints: `runs/<run>/ckpt-<step>.pt` + `runs/<run>/latest.pt` containing
 `{'config': TrainConfig(asdict), 'brain_config': ..., 'graph_path': ..., 'model': state_dict, 'optim': ..., 'step': int, 'stage': str}`.
+Stage 2 additionally keeps `runs/<run>/best.pt` (same format: the best network, see gating below).
 `flychess.load_brain(path_or_run) -> (FlyBrain, BrainGraph)`.
 
 Stage 1 (imitation): cross-entropy on the human move (label smoothing 0.0) + MSE on value. Log every 20 steps.
-Stage 2 (self-play): generate games with batched MCTS (`mcts.py`, all leaf evaluations batched through the GPU,
-virtual loss, Dirichlet noise at root, temperature 1 for first 30 plies then 0), store (planes, π, z) in a replay
-buffer, train on samples. Also every `selfplay_eval_every_iters` iterations play `elo_games` against the previous
-checkpoint & RandomPlayer and log Elo (during imitation a quick Elo runs every `elo_every` steps; 0 disables it).
+During imitation a quick Elo (`fly` vs random / material) runs every `elo_every` steps with `elo_games` games
+(0 disables it).
+
+Stage 2 (self-play v2, `train/selfplay.py`). The v1 stage (64 games/iteration, lr 2e-4, training on self-play
+targets only) made the searching player *weaker* than the imitation checkpoint (0–5 with `superfly`): it forgot
+the human data. v2 rehearses the human data, gates every candidate and generates ten times more games.
+`selfplay_iters` iterations (default 50), each:
+
+1. **Generate** `selfplay_games_per_iter=512` games with the **best** network: batched PUCT MCTS (`mcts.py`,
+   `mcts_sims=100` simulations per move, all leaf evaluations of the batch in one GPU forward, no virtual loss —
+   one leaf per tree per step), Dirichlet noise at the root (`dirichlet_alpha=0.3`, `dirichlet_eps=0.25`),
+   temperature 1 for the first `temperature_plies=30` plies then argmax, no resignation, `max_game_plies=300` cap
+   (a draw). Up to `selfplay_lockstep_games=512` games are searched in one lockstep batch (more games run as
+   several consecutive batches; `selfplay_workers` threads split the games further). Progress is logged every 64
+   finished games (a `status` record with the pos/s and an ETA). Every position stores `(planes, π, z, q)`: the
+   shard-format planes, the root visit distribution, the game result from the mover's perspective and the root
+   search value; the `ReplayBuffer` (`replay_buffer_size=200000`, a ring) keeps π sparsely (top-k visited moves)
+   with the legal-move indices.
+2. **Train** `selfplay_train_steps_per_iter=400` AdamW steps at `selfplay_lr=1e-4` (constant), batch
+   `selfplay_batch_size=384`, the same two parameter groups and betas (0.9, 0.95) as imitation (no weight decay on
+   biases, leaks, gains — `log_gain` included — and, under Dale's law, `syn_gain`). The weights and the optimizer
+   state are snapshotted before training (the "best" snapshot the gate can fall back to). Every batch is mixed: `selfplay_human_mix=0.5` of it
+   streams from the imitation shards (`shards_dir` / `shard_name` series and repeat factors exactly as in stage 1;
+   policy target = one-hot stored move, *unmasked* cross-entropy like stage 1; value target = the stored value)
+   and the rest samples the replay buffer (policy target = π with illegal moves masked; value target =
+   `selfplay_value_blend · z + (1 − selfplay_value_blend) · q`, default blend 0.5). Loss = cross-entropy +
+   `value_loss_weight` × MSE over all rows; `train` records carry `n_self`, `n_human`, `human_mix` and the per-half
+   `policy_loss_self/human`, `value_loss_self/human`, `top1_self/human`. `selfplay_human_mix=0` reproduces v1's
+   targets, `1` is pure rehearsal.
+3. **Gate** (`selfplay_gate=true`): the candidate (the weights after training) plays the best weights, both as
+   `superfly` (`FlyEngine`, `selfplay_gate_sims=100` simulations, deterministic), `selfplay_gate_games=40` games
+   on paired distinct openings (each opening twice with the colours swapped). Openings are positions after 8–12
+   plies of the iteration's own games; only when those yield too few distinct positions is the list topped up from
+   a fixed set of 20 standard first moves (`fixed_openings()`: e4 e5, d4 d5, …) — the one place where moves not
+   chosen by the fly enter a match (the fly still chooses every move *from* those positions; on the full brain
+   with 512 games the top-up is practically never used, and `fixed_openings_used` on the record says when it was).
+   The candidate is promoted to best iff its score fraction (wins + ½ draws) / games ≥
+   `selfplay_gate_threshold=0.55`; otherwise it is discarded: the model reloads the best weights *and* the
+   optimizer reloads the pre-training snapshot (the moments of a direction just judged worse go with it), the
+   replay buffer is kept and the iteration still counts. An `elo` record with `opponent='previous-best'` logs
+   `games, wins, draws, losses, elo_estimate, score, threshold, promoted, openings, fixed_openings_used, truncated,
+   mean_plies, sims, iteration, seconds`, a `status` line says "candidate promoted/rejected" and the first gate
+   game is logged as a `game` record (`source='eval', opponent='previous-best'`, bypassing the per-minute limit).
+   **A gate that cannot run never promotes**: if the match raises (an evaluator bug, CUDA OOM, …) or returns no
+   result (`FlyEngine` unimportable), the candidate is rejected exactly as above, a `status` record with
+   `gate_error` (and `promoted=false, gated=false`, no `iteration`) is written, `latest.pt` / `best.pt` are saved
+   with the best weights and the stage stops with `RuntimeError` so the operator notices; `--resume` redoes the
+   iteration. `selfplay_gate=false` (or `selfplay_gate_games=0`) always promotes.
+4. **Evaluate** every `selfplay_eval_every_iters` iterations (and after the last): `elo_games` games as `fly`
+   against a random opponent (`opponent='random'`) on paired openings; without a gate also against the previous
+   iteration's weights (`opponent='previous-iteration'`).
+5. **Checkpoint**: `ckpt-<step>.pt` and `latest.pt` hold the best network (= the promoted candidate or the
+   unchanged best), copied to `best.pt`; the `status` record `{stage: 'selfplay', iteration: n, promoted, gated}`
+   marks the iteration as done.
+
+Resume (`--resume`): finished iterations are counted from those `status` records, the optimizer state comes from
+`latest.pt` when it was written by this stage at the resumed step (its moments are kept, but `selfplay_lr`, the
+betas and `weight_decay` are re-applied from the config, so a `--set selfplay_lr=…` on resume takes effect), and
+`best.pt` (when at least one iteration finished) is loaded as the best network — so an interrupt during training
+or gating never leaks an ungated candidate into the games. Ctrl-C and any `RuntimeError` (a non-finite loss, a
+gate that could not run) restore the best weights and optimizer snapshot before saving `latest.pt` / `best.pt`.
+The replay buffer is not persisted.
+The tiny preset (`configs/tiny.yaml`) keeps the gate at 2 games × 4 simulations.
 
 Python API: `flychess.train(run='fly1', stage='all', **overrides)`.
 
@@ -325,10 +385,10 @@ Python API: `flychess.train(run='fly1', stage='all', **overrides)`.
 `runs/<run>/metrics.jsonl`: one JSON object per line, always with `"t": unix_time, "step": int, "kind": str`. Kinds:
 - `train`: `{loss, policy_loss, value_loss, top1, top3, lr, pos_per_sec, gpu_mem_gb, epoch, stage}`
 - `eval`: `{val_loss, val_top1, val_top3, val_value_mse}`
-- `elo`: `{opponent, games, wins, draws, losses, elo_estimate}`
-- `game`: `{pgn, result, moves: int, source: 'selfplay'|'eval'}` (a sample game, ≤ 1 per minute)
+- `elo`: `{opponent, games, wins, draws, losses, elo_estimate}` (+ `score, threshold, promoted, openings, fixed_openings_used, truncated, mean_plies, sims, iteration, seconds` from the self-play gate, `opponent='previous-best'`)
+- `game`: `{pgn, result, moves: int, source: 'selfplay'|'eval'}` (a sample game, ≤ 1 per minute; the self-play gate game is written regardless, with `opponent='previous-best'`)
 - `activity`: `{neuron_idx: [...], values: [...]}` sampled 2048 neurons' activity for a heatmap (≤ 1 per 30 s)
-- `status`: `{message, stage, total_steps, eta_s}`
+- `status`: `{message, stage, total_steps, eta_s}` (a finished self-play iteration adds `iteration, promoted, gated`; a gate that could not run adds `gate_error, promoted=false, gated=false` without `iteration`)
 `runs/<run>/run.json` holds the static description (config, graph meta, start time).
 
 ## 8. Web model format (`export/web.py` ⟷ `web/engine/loader.js`)
