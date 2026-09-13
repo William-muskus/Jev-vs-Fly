@@ -199,7 +199,8 @@ class BrainConfig:
     graph_path: str
     steps: int = 8            # recurrent timesteps per position
     alpha: float = 0.5        # initial leak (learned per neuron via sigmoid(logit))
-    activation: str = 'relu'  # 'relu' | 'gelu' | 'tanh'
+    activation: str = 'relu'  # 'relu' | 'gelu' | 'tanh' | 'satrelu' (sat * tanh(relu(x) / sat): bounded firing rates)
+    sat: float = 10.0         # firing-rate ceiling for 'satrelu'
     input_dim: int = 1280
     num_moves: int = 4168
     weight_init_scale: float = 1.0   # multiplies log1p(syn_count) init

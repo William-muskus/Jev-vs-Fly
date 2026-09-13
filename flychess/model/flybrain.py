@@ -397,7 +397,7 @@ class FlyBrain(nn.Module):
             return self._update_fn
         try:
             self._update_fn = _compiled_update(self.config.activation, self.config.sat)
-        except Exception as exc:  # pragma: no cover - depends on the local toolchain
+        except Exception as exc:  # noqa: BLE001 - depends on the local toolchain
             warnings.warn(f"fused recurrent update unavailable ({exc}); using eager PyTorch")
             self.fused = False
         return self._update_fn
