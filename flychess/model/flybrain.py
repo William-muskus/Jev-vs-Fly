@@ -43,6 +43,22 @@ def _gelu_tanh(t: Tensor) -> Tensor:
     return F.gelu(t, approximate="tanh")
 
 
+class _SatReLUFn(torch.autograd.Function):
+    """``sat * tanh(relu(t) / sat)`` saving only ``t`` for backward (one tensor per timestep instead of four)."""
+
+    @staticmethod
+    def forward(ctx, t: Tensor, sat: float) -> Tensor:
+        ctx.save_for_backward(t)
+        ctx.sat = sat
+        return torch.tanh(torch.relu(t) * (1.0 / sat)).mul_(sat)
+
+    @staticmethod
+    def backward(ctx, g: Tensor):
+        (t,) = ctx.saved_tensors
+        y = torch.tanh(torch.relu(t) * (1.0 / ctx.sat))
+        return g * (1.0 - y * y) * (t > 0), None
+
+
 class SatReLU(nn.Module):
     """Saturating rectifier ``sat * tanh(relu(x) / sat)``: non-negative rates with a ceiling of ``sat``.
 
@@ -56,7 +72,7 @@ class SatReLU(nn.Module):
         self.sat = float(sat)
 
     def forward(self, t: Tensor) -> Tensor:
-        return self.sat * torch.tanh(F.relu(t) / self.sat)
+        return _SatReLUFn.apply(t, self.sat)
 
     def extra_repr(self) -> str:
         return f"sat={self.sat}"
