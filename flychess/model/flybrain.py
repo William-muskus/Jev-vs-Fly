@@ -391,6 +391,16 @@ class FlyBrain(nn.Module):
         # freezing the whole connectome while biases/heads keep learning. ``config.dtype`` only
         # governs the dense parts (``w_in``/``b_in`` and the heads); prefer float32 + autocast.
         self.syn_gain = nn.Parameter(init_gain.float())
+        # Homeostatic intrinsic gain per (post-synaptic) neuron, multiplying its whole ionotropic input.
+        # Always present in the state dict (zeros = gain 1) so checkpoints stay interchangeable.
+        self.homeostatic = bool(getattr(config, "homeostatic", False))
+        if self.homeostatic:
+            self.log_gain = nn.Parameter(torch.zeros(self.n, dtype=torch.float32))
+        else:
+            self.register_buffer("log_gain", torch.zeros(self.n, dtype=torch.float32))   # gain 1, not trained
+        self.register_buffer("edge_row", torch.repeat_interleave(
+            torch.arange(self.n, dtype=torch.int64), (self.csr_indptr[1:] - self.csr_indptr[:-1]).to(torch.int64)),
+            persistent=False)
         self.bias = nn.Parameter(torch.zeros(self.n, dtype=torch.float32))
         self.leak_logit = nn.Parameter(
             torch.full((self.n,), math.log(config.alpha / (1 - config.alpha)), dtype=torch.float32)
@@ -474,10 +484,49 @@ class FlyBrain(nn.Module):
         ``dale=False``; with ``dale=True`` that is what the sign rule (+1 for DA/SER/OCT) gives anyway."""
         gain = self.syn_gain.float()
         if self.dale:
-            return self.sign * F.softplus(gain)
-        if self.neuromod:
-            return torch.where(self.mod_mask, F.softplus(gain), gain)
-        return gain
+            w = self.sign * F.softplus(gain)
+        elif self.neuromod:
+            w = torch.where(self.mod_mask, F.softplus(gain), gain)
+        else:
+            w = gain
+        if self.homeostatic or bool((self.log_gain != 0).any()):
+            g = torch.exp(self.log_gain.float())[self.edge_row]        # post-synaptic neuron's gain per synapse
+            if self.neuromod:
+                g = torch.where(self.mod_mask, torch.ones_like(g), g)  # gating synapses are not scaled
+            w = w * g
+        return w
+
+    @torch.no_grad()
+    def calibrate_gains(self, x: Tensor, target: float = 0.5, iters: int = 8, min_gain: float = 0.2,
+                        max_gain: float = 200.0, min_std: float = 1e-7) -> dict[str, float]:
+        """Homeostatic calibration of ``log_gain`` on a batch of positions ``x (B, input_dim)``.
+
+        Each pass runs the network, measures per neuron the standard deviation *across positions* of its
+        ionotropic synaptic input (``W @ h_T``), and rescales the neuron's gain towards ``target`` (damped,
+        clipped to ``[min_gain, max_gain]``). Neurons whose input does not vary with the position
+        (std < ``min_std``) are left alone — only information-carrying pathways are amplified. With the
+        retina this is what lets the visual signal reach the central brain: at the row-normalised init it
+        attenuates ~20x per synaptic hop. Returns summary statistics of the final gains.
+        """
+        was_training = self.training
+        self.eval()
+        try:
+            for _ in range(iters):
+                _, _, h = self.forward(x, return_activity=True)          # (B, n) canonical order
+                w = self.effective_weights()
+                if self.neuromod:
+                    w = torch.where(self.mod_mask, torch.zeros_like(w), w)
+                syn = self.canonical_structure().to(x.device).spmm(w, h.t().contiguous())   # (n, B)
+                std = syn.std(dim=1)
+                factor = torch.where(std > min_std, target / (std + 1e-12), torch.ones_like(std))
+                factor = factor.clamp(0.25, 4.0)                          # damped steps
+                new = (torch.exp(self.log_gain) * factor).clamp(min_gain, max_gain)
+                self.log_gain.copy_(torch.log(new))
+        finally:
+            self.train(was_training)
+        g = torch.exp(self.log_gain)
+        return {"gain_mean": float(g.mean()), "gain_median": float(g.median()), "gain_max": float(g.max()),
+                "gain_min": float(g.min()), "frac_amplified": float((g > 1.5).float().mean())}
 
     def loop_weights(self) -> tuple[Tensor, Tensor | None]:
         """``(w_ion, w_mod)`` as the recurrent loop consumes them (loop CSR order); ``w_mod`` is ``None``
@@ -677,6 +726,12 @@ class FlyBrain(nn.Module):
         model.load_state_dict(state_dict, strict=strict)
         return model
 
+    def _load_from_state_dict(self, state_dict, prefix, *args, **kwargs):  # noqa: D401 - torch hook
+        # Checkpoints written before the homeostatic gain existed: gain 1 everywhere.
+        if prefix + "log_gain" not in state_dict:
+            state_dict[prefix + "log_gain"] = torch.zeros_like(self.log_gain)
+        super()._load_from_state_dict(state_dict, prefix, *args, **kwargs)
+
     def count_parameters(self) -> dict[str, int]:
         """Trainable parameter counts per group plus ``total``."""
         counts = {
@@ -692,6 +747,8 @@ class FlyBrain(nn.Module):
             counts["retina_proj"] = self.w_ret.numel() + self.b_ret.numel()
         if self.central_dim > 0:
             counts["central_proj"] = sum(p.numel() for p in self.central_proj.parameters())
+        if self.homeostatic:
+            counts["log_gain"] = self.log_gain.numel()
         counts["total"] = sum(counts.values())
         return counts
 

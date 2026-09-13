@@ -51,6 +51,10 @@ class BrainConfig:
                               input; empty = final step only. Each must lie in ``1..steps``, strictly increasing.
     neuromod : bool           synapses from DA / SER / OCT neurons gate the others multiplicatively
                               (``pre = ion * (1 + tanh(mod)) + bias + inputs``) instead of adding to them.
+    homeostatic : bool        learn a per-neuron intrinsic gain ``exp(log_gain)`` on the synaptic input (Dale-safe,
+                              folded into the effective weights). The trainer calibrates it on a data batch at
+                              initialisation so that deep pathways (retina -> lamina -> medulla -> ... ) carry
+                              signal instead of attenuating ~20x per hop.
     central_dim : int         0 = off; else a ``Linear(n_central, central_dim)`` of the final activity of the
                               graph's ``'central'`` neurons is concatenated to the head input.
     """
@@ -71,6 +75,7 @@ class BrainConfig:
     readout_steps: tuple[int, ...] = ()
     neuromod: bool = False
     central_dim: int = 0
+    homeostatic: bool = False    # per-neuron intrinsic gain, calibrated on data at init (see FlyBrain.calibrate_gains)
 
     def __post_init__(self) -> None:
         if self.activation not in ACTIVATIONS:

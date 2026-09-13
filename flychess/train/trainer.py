@@ -136,6 +136,17 @@ def build_model(cfg: TrainConfig, graph: BrainGraph | None = None,
     return model, graph, gp
 
 
+def calibrate_model(model: FlyBrain, cfg: TrainConfig, device: torch.device | str, batch: int = 256) -> dict[str, float]:
+    """Run :meth:`FlyBrain.calibrate_gains` on a batch of real training positions (data-dependent init)."""
+    from flychess.data.shards import ShardDataset, collate, load_split, parse_shard_names
+
+    names = parse_shard_names(cfg.shard_name) if cfg.shard_name else None
+    train_files, _ = load_split(cfg.shards_dir, cfg.val_fraction, cfg.seed, names=names)
+    it = iter(ShardDataset(train_files[:4], seed=cfg.seed + 7))
+    x = collate([next(it) for _ in range(batch)])["planes"].to(device)
+    return model.calibrate_gains(x)
+
+
 # num_workers / seed: the imitation stage replays the loader past the already-trained batches of the epoch on
 # resume, and the batch sequence is only identical for the same worker count and seed
 RESUME_DRIFT_FIELDS = ("graph", "brain", "shards_dir", "shard_name", "batch_size", "lr", "weight_decay",
@@ -201,6 +212,9 @@ def train(
             print(f"[train] resume requested but {latest} does not exist: starting from scratch")
         model, graph, graph_path = build_model(cfg, device=device)
         step = 0
+        if getattr(model, "homeostatic", False):
+            stats = calibrate_model(model, cfg, device)
+            print(f"[train] homeostatic gain calibration: {stats}")
 
     logger = MetricsLogger(run_dir)
     logger.write_run_json(
