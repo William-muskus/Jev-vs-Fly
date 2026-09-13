@@ -2,8 +2,11 @@
 // There is no WebGPU under node, so this checks the *math* of the WGSL kernels through their
 // line-by-line f32 JS mirrors (emulateInject / emulateStep / emulateMatvec / emulateForward in
 // flybrain-gpu.js) against a float64 reference of SPEC §4 and against FlyBrain, for every
-// activation, on a tiny synthetic .flyb blob. The shader text itself is exercised in the browser by
-// web/test/browser/gpu-parity.mjs (real model, real device). Also covers the promise-aware MCTS.
+// activation, on a tiny synthetic .flyb blob — including the SPEC §8 feature kernels (retina drive,
+// base with both injections, gated step rows for neuromod, readout / trace gather, central matvec)
+// and the end-to-end mirror on every feature combination. The shader text itself is exercised in
+// the browser by web/test/browser/gpu-parity.mjs (real model, real device). Also covers the
+// promise-aware MCTS.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
@@ -13,11 +16,12 @@ import path from 'node:path';
 import { parseArrays } from '../engine/loader.js';
 import { FlyBrain } from '../engine/flybrain.js';
 import {
-  FlyBrainGPU, activationKind, activationWGSL, activationF32, inverseInputMap, modelShape,
-  emulateInject, emulateStep, emulateMatvec, emulateForward, valueFromHidden,
+  FlyBrainGPU, activationKind, activationWGSL, activationF32, inverseInputMap, modelShape, bucketRows,
+  emulateInject, emulateStep, emulateMatvec, emulateForward, emulateRetina, emulateGather, valueFromHidden,
 } from '../engine/flybrain-gpu.js';
 import { runMCTS, runMCTSAsync, createSearch, createSearchAsync } from '../engine/mcts.js';
 import { synthModel } from './support/synthmodel.mjs';
+import { reference as referenceAll, FEATURE_CASES } from './support/reference.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const chessPath = path.join(here, '..', 'vendor', 'chess.js');
@@ -233,6 +237,108 @@ for (const [activation, extra] of [['relu', {}], ['tanh', {}], ['gelu', {}], ['g
       assert.ok(maxAbsDiff(got.policy, cpu.policy) < 1e-3, `policy vs FlyBrain ${maxAbsDiff(got.policy, cpu.policy)}`);
       assert.ok(Math.abs(got.value - ref.value) < 1e-4, `value ${got.value} vs ${ref.value}`);
       assert.ok(Math.abs(got.value - cpu.value) < 1e-4);
+      assert.ok(maxAbsDiff(got.activity, ref.activity) < 1e-4, `activity ${maxAbsDiff(got.activity, ref.activity)}`);
+    }
+  });
+}
+
+// ---------------------------------------------------------------------------------------------
+// SPEC §8 feature kernels
+test('bucketRows separates the rows with modulatory inputs', () => {
+  const m = model({}, { nnzMod: 60 });
+  const plain = bucketRows(m.arrays.csr_indptr, m.header.n);
+  assert.equal(plain.length, 3);
+  assert.ok(plain.every((b) => b.modRows === 0));
+  for (const b of plain) assert.deepEqual(Array.from(b.rows), Array.from(b.rows).sort((a, c) => a - c), 'ascending rows');
+  const withMod = bucketRows(m.arrays.csr_indptr, m.header.n, m.arrays.mod_indptr);
+  assert.equal(withMod.length, 3);
+  const all = withMod.flatMap((b) => Array.from(b.rows)).sort((a, b) => a - b);
+  assert.deepEqual(all, Array.from({ length: m.header.n }, (_, i) => i), 'the buckets partition the rows');
+  let gated = 0;
+  for (const b of withMod) {
+    for (const [k, i] of Array.from(b.rows).entries()) assert.equal(m.arrays.mod_indptr[i + 1] > m.arrays.mod_indptr[i], k < b.modRows, `gated rows first (bucket ${b.lanes}, slot ${k})`);
+    gated += b.modRows;
+    const head = Array.from(b.rows).slice(0, b.modRows), tail = Array.from(b.rows).slice(b.modRows);
+    assert.deepEqual(head, [...head].sort((a, c) => a - c)); assert.deepEqual(tail, [...tail].sort((a, c) => a - c));
+  }
+  assert.ok(gated > 0);
+});
+
+test('retina kernel mirror = w_ret·planes[:, square] + b_ret; gather mirror copies with an offset', () => {
+  const m = model({}, { nRet: 12 });
+  const x = randomInput(4);
+  const drive = emulateRetina(m, x, new Float32Array(12));
+  const ref = referenceAll(m.header, m.arrays, x).retinaDrive;
+  assert.ok(maxAbsDiff(drive, ref) < 1e-5);
+  const dst = new Float32Array(10).fill(-1);
+  emulateGather(Float32Array.from([5, 6, 7, 8]), Uint32Array.from([3, 0, 2]), 3, 4, dst);
+  assert.deepEqual(Array.from(dst), [-1, -1, -1, -1, 8, 5, 7, -1, -1, -1]);
+  assert.throws(() => inverseInputMap(Int32Array.from([1, 1]), 4, 'retina_idx'), /retina_idx has duplicate/);
+});
+
+test('step kernel mirror gates the rows with modulatory inputs: pre = ion·(1 + tanh(mod)) + base', () => {
+  const m = model({}, { nnzMod: 60, activation: 'satrelu' });
+  const S = modelShape(m);
+  const act = activationF32(S.kind, S.sat);
+  const r = rng(5);
+  const base = Float32Array.from({ length: S.n }, () => (r() - 0.5) * 4);
+  const h = Float32Array.from({ length: S.n }, () => (r() - 0.5) * 6);
+  const out = emulateStep(m, S.alpha, act, base, h, new Float32Array(S.n));
+  const a = m.arrays;
+  let gated = 0;
+  for (let i = 0; i < S.n; i++) {
+    let ion = 0;
+    for (let e = a.csr_indptr[i]; e < a.csr_indptr[i + 1]; e++) ion += a.w[e] * h[a.csr_indices[e]];
+    let mod = 0;
+    for (let e = a.mod_indptr[i]; e < a.mod_indptr[i + 1]; e++) mod += a.w_mod[e] * h[a.mod_indices[e]];
+    if (a.mod_indptr[i + 1] > a.mod_indptr[i]) gated++;
+    const pre = ion * (1 + Math.tanh(mod)) + base[i];
+    const want = (1 - S.alpha[i]) * h[i] + S.alpha[i] * (pre > 0 ? 10 * Math.tanh(pre / 10) : 0);
+    assert.ok(Math.abs(out[i] - want) < 1e-5, `row ${i}: ${out[i]} vs ${want}`);
+  }
+  assert.ok(gated > 5, `${gated} gated rows`);
+});
+
+test('inject kernel with the retina: base = bias + inj[inv_in] + drive[inv_ret]; sensory_input=false skips w_in', () => {
+  const m = model({}, { nRet: 12 });
+  const S = modelShape(m);
+  const x = randomInput(6);
+  const invIn = inverseInputMap(m.arrays.input_idx, S.n), invRet = inverseInputMap(m.arrays.retina_idx, S.n, 'retina_idx');
+  const drive = emulateRetina(m, x, new Float32Array(12));
+  const base = emulateInject(m, invIn, x, new Float32Array(S.n), invRet, drive);
+  const ref = referenceAll(m.header, m.arrays, x);
+  const want = Float64Array.from(m.arrays.bias);
+  for (let k = 0; k < m.arrays.input_idx.length; k++) {
+    let s = m.arrays.b_in[k];
+    for (let j = 0; j < 1280; j++) s += m.arrays.w_in[k * 1280 + j] * x[j];
+    want[m.arrays.input_idx[k]] += s;
+  }
+  for (let k = 0; k < 12; k++) want[m.arrays.retina_idx[k]] += ref.retinaDrive[k];
+  assert.ok(maxAbsDiff(base, want) < 1e-5);
+  const vo = model({}, { nRet: 12, sensoryInput: false });
+  assert.equal(vo.arrays.w_in.length, 0);
+  const none = new Uint32Array(S.n).fill(0xffffffff);
+  const base2 = emulateInject(vo, none, x, new Float32Array(S.n), invRet, emulateRetina(vo, x, new Float32Array(12)));
+  const want2 = Float64Array.from(vo.arrays.bias);
+  const ref2 = referenceAll(vo.header, vo.arrays, x);
+  for (let k = 0; k < 12; k++) want2[vo.arrays.retina_idx[k]] += ref2.retinaDrive[k];
+  assert.ok(maxAbsDiff(base2, want2) < 1e-5);
+});
+
+for (const [label, opts] of FEATURE_CASES) {
+  test(`emulated GPU forward with the §8 features matches the float64 reference and FlyBrain (${label})`, () => {
+    const m = model({}, opts);
+    const js = new FlyBrain(m);
+    const S = modelShape(m);
+    assert.equal(S.direct, !opts.readoutSteps && !opts.centralDim, 'direct head input only without readouts / central summary');
+    for (let s = 0; s < 2; s++) {
+      const x = randomInput(400 + s);
+      const got = emulateForward(m, x);
+      const ref = referenceAll(m.header, m.arrays, x);
+      const cpu = js.forward(x);
+      assert.ok(maxAbsDiff(got.policy, ref.policy) < 1e-3, `policy vs reference ${maxAbsDiff(got.policy, ref.policy)}`);
+      assert.ok(maxAbsDiff(got.policy, cpu.policy) < 1e-3, `policy vs FlyBrain ${maxAbsDiff(got.policy, cpu.policy)}`);
+      assert.ok(Math.abs(got.value - ref.value) < 1e-4, `value ${got.value} vs ${ref.value}`);
       assert.ok(maxAbsDiff(got.activity, ref.activity) < 1e-4, `activity ${maxAbsDiff(got.activity, ref.activity)}`);
     }
   });

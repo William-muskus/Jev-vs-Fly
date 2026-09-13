@@ -1,22 +1,34 @@
 // worker.js — Web Worker hosting the fly brain. Every move sent back was chosen by the network
 // (SPEC §9): larva = temperature-1.2 sample of the policy, fly = argmax policy with a 1-ply
-// value-head check over the top-3 policy moves, superfly = 100-simulation PUCT MCTS (≈0.4 s per move
-// on the full brain with WebGPU, ≈8 s in plain JS; Python uses 200).
+// value-head check over the top-3 policy moves, superfly = PUCT MCTS with a backend-dependent budget
+// (400 simulations on WebGPU ≈ 1.5–3 s per move on the full brain, 40 in plain JS ≈ 3.5 s; Python uses 200).
 //
 // Messages in:  {type:'load', baseUrl, gpu?}   gpu:false skips WebGPU (plain-JS engine only)
-//               {type:'move', id, fen, moves:[uci...], difficulty:'larva'|'fly'|'superfly'}
+//               {type:'move', id, fen, moves:[uci...], difficulty:'larva'|'fly'|'superfly', trace?:true}
 //               {type:'eval', id, fen, moves:[uci...]}
 //               {type:'cancel', id}     abandon the move request `id` (a running superfly search stops
 //                                       within a few simulations; a queued one is skipped)
 //               {type:'debug', id, op:'lose-gpu'}   tests only: destroy the WebGPU device (→ JS fallback)
 // Messages out: {type:'progress', loaded, total, phase, n, nnz, runName}
-//               {type:'ready', header, sample:{idx, xy, cls}, silhouette:{xy, cls}, legend, fromCache, bytes, backend, gpu}
-//                   backend: 'webgpu' | 'js'; gpu: {error} says why WebGPU was not used
+//               {type:'ready', header, features, sample:{idx, xy, cls}, silhouette:{xy, cls}, legend, retina, fromCache, bytes, backend, gpu}
+//                   backend: 'webgpu' | 'js'; gpu: {error} says why WebGPU was not used;
+//                   features: {vision, sensoryInput, readoutSteps, neuromod, centralDim, nRet, nCentral, steps} (SPEC §8);
+//                   retina (vision only, else null): {n, uv: Float32Array(2n) eye-map coordinates, eye: Uint8Array(n)
+//                   0 left / 1 right, type: Uint8Array(n) index into `legend`, legend: ['R1-6', 'R7', 'R8'],
+//                   square: Uint8Array(n) board square rank*8+file (mover's perspective), idx: Int32Array(n) blob neuron}
 //               {type:'thinking', id, done, total}            (superfly only, every 10 simulations)
-//               {type:'move', id, move, san, policyTop, value, activitySample, thinkMs, sims, stepMs, backend}
+//               {type:'move', id, move, san, policyTop, value, activitySample, retinaDrive, trace, thinkMs, sims, stepMs, backend}
+//                   retinaDrive: Float32Array(n_ret) — the per-photoreceptor input drive of the position the fly
+//                   looked at (what the fly sees; null without vision); trace: only when the request asked for it
 //               {type:'move', id, move:null, cancelled:true}  (reply to a cancelled request)
-//               {type:'eval', id, value, policyTop, activitySample, backend}
+//               {type:'eval', id, value, policyTop, activitySample, retinaDrive, trace, traceSteps, backend}
+//                   trace: Float32Array(steps × 2048) — the sampled neurons' activity after every timestep
+//                   ([t][j], same neurons as activitySample, whose positions / classes came with 'ready')
 //               {type:'error', id?, message}
+//
+// The activity trace is a mode of the engines' forward pass (one gather per timestep on the GPU,
+// read back with everything else): eval always carries it (the page's brain view), a move only on
+// request, and the superfly search never asks for it.
 //
 // Requests are handled strictly one at a time (they share one chess.js instance); `cancel` is the
 // only message acted on immediately.
@@ -127,9 +139,10 @@ async function handleLoad(msg) {
     } finally { clearTimeout(timer); }
   }
   const n = brain.n;
-  sampleIdx = spreadSample(n, Math.min(SAMPLE_N, n), 0x9e3779b9);
+  sampleIdx = stratifiedSample(n, Math.min(SAMPLE_N, n), brain.superClass, model.arrays.retina_idx, 0x9e3779b9);
   const silIdx = spreadSample(n, Math.min(SILHOUETTE_N, n), 0x85ebca6b);
   const legend = readLegend(model.header);
+  const F = brain.features;
   self.postMessage({
     type: 'ready',
     header: model.header,
@@ -138,9 +151,62 @@ async function handleLoad(msg) {
     legend,
     backend: backend(),
     gpu: gpu ? { timestamps: gpu.timestamps } : { error: gpuError },
+    features: { vision: F.vision, sensoryInput: F.sensoryInput, readoutSteps: F.readoutSteps, neuromod: F.neuromod, centralDim: F.centralDim, nRet: F.nRet, nCentral: F.nCentral, steps: brain.steps },
+    retina: retinaInfo(model),
     sample: { idx: sampleIdx, xy: projectXY(brain, sampleIdx), cls: classesOf(brain, sampleIdx) },
     silhouette: { xy: projectXY(brain, silIdx), cls: classesOf(brain, silIdx) },
   });
+}
+
+/** The retina metadata the page draws (eye map + which square every photoreceptor watches); null without vision. */
+function retinaInfo({ header, arrays }) {
+  if (!brain.vision) return null;
+  const n = brain.nRet;
+  const u8 = (a) => (a && a.length === n ? Uint8Array.from(a) : new Uint8Array(n));
+  return {
+    n,
+    uv: arrays.retina_uv && arrays.retina_uv.length === 2 * n ? Float32Array.from(arrays.retina_uv) : new Float32Array(2 * n),
+    eye: u8(arrays.retina_eye),
+    type: u8(arrays.retina_type),
+    legend: Array.isArray(header.retina_type_legend) ? header.retina_type_legend : [],
+    square: Uint8Array.from(arrays.retina_square),
+    idx: Int32Array.from(arrays.retina_idx),
+  };
+}
+
+const CLASS_QUOTA = 160;   // sampled neurons guaranteed per super class (and for the photoreceptors) when the brain has that many
+
+/**
+ * The page's activity sample: k of n neurons, deterministic. A plain random sample of the full brain
+ * is 58 % optic lobe and holds ~20 descending neurons, so the thought replay could not show the
+ * signal reaching the motor side; every super class (and the retina's photoreceptors) is therefore
+ * guaranteed up to CLASS_QUOTA members, the rest of the budget is filled by the spread sample.
+ * Without class labels (or when k >= n) this is spreadSample.
+ */
+function stratifiedSample(n, k, superClass, retinaIdx, seed) {
+  if (!superClass || k >= n) return spreadSample(n, k, seed);
+  const groups = new Map();
+  const ret = retinaIdx && retinaIdx.length ? new Set(retinaIdx) : null;
+  for (let i = 0; i < n; i++) {
+    const key = ret && ret.has(i) ? -1 : superClass[i];
+    let g = groups.get(key); if (!g) groups.set(key, g = []); g.push(i);
+  }
+  const chosen = new Set();
+  let x = seed >>> 0;
+  const next = () => { x ^= x << 13; x >>>= 0; x ^= x >>> 17; x ^= x << 5; x >>>= 0; return x; };
+  const keys = [...groups.keys()].sort((a, b) => a - b);
+  const quota = Math.min(CLASS_QUOTA, Math.floor(k / keys.length));
+  for (const key of keys) {
+    const g = groups.get(key);
+    const want = Math.min(quota, g.length);
+    let got = 0;
+    for (let tries = 0; got < want && chosen.size < k && tries < 20 * want; tries++) {
+      const i = g[next() % g.length];
+      if (!chosen.has(i)) { chosen.add(i); got++; }
+    }
+  }
+  for (const i of spreadSample(n, k, seed ^ 0x5bd1e995)) { if (chosen.size >= k) break; chosen.add(i); }
+  return Int32Array.from(chosen).sort();
 }
 
 /** Deterministic, well-spread sample of k indices out of n (golden-ratio stride + hash jitter). */
@@ -237,9 +303,11 @@ async function handleMove(msg) {
     return;
   }
   const x = enc.encodeBoard(chess);
-  const res = await settle(net.forward(x));
+  const res = await settle(net.forward(x, msg.trace ? { trace: sampleIdx } : undefined));
   const probs = policyForLegal(res.policy, idx, 1);
   const act = activitySample(res.activity);
+  const retinaDrive = res.retinaDrive ? Float32Array.from(res.retinaDrive) : null;   // the engines reuse the view
+  const trace = msg.trace ? res.trace : null;
   let chosen, value = res.value, sims = 0, note = '';
 
   if (cfg.kind === 'sample') {
@@ -289,7 +357,7 @@ async function handleMove(msg) {
     type: 'move', id: msg.id,
     move: uciOf(chosen), san: chosen.san,
     policyTop: policyTopFrom(moves, probs, 5),
-    value, activitySample: act, thinkMs, sims, stepMs: net.lastStepMs, note, backend: backend(),
+    value, activitySample: act, retinaDrive, trace, traceSteps: brain.steps, thinkMs, sims, stepMs: net.lastStepMs, note, backend: backend(),
   });
 }
 
@@ -298,18 +366,20 @@ async function handleEval(msg) {
   setPosition(msg.fen, msg.moves);
   const { moves, idx } = legalMoves();
   if (moves.length === 0) {
-    self.postMessage({ type: 'eval', id: msg.id, value: 0, policyTop: [], activitySample: null, backend: backend() });
+    self.postMessage({ type: 'eval', id: msg.id, value: 0, policyTop: [], activitySample: null, retinaDrive: null, trace: null, traceSteps: brain.steps, backend: backend() });
     return;
   }
-  const res = await settle(net.forward(enc.encodeBoard(chess)));
+  const res = await settle(net.forward(enc.encodeBoard(chess), { trace: sampleIdx }));
   const probs = policyForLegal(res.policy, idx, 1);
   self.postMessage({
     type: 'eval', id: msg.id, value: res.value,
-    policyTop: policyTopFrom(moves, probs, 5), activitySample: activitySample(res.activity), backend: backend(),
+    policyTop: policyTopFrom(moves, probs, 5), activitySample: activitySample(res.activity),
+    retinaDrive: res.retinaDrive ? Float32Array.from(res.retinaDrive) : null,
+    trace: res.trace, traceSteps: brain.steps, backend: backend(),
   });
 }
 
-/** {type:'bench', reps?, backend?: 'js'|'webgpu', activity?: boolean} → per-forward latency of the requested engine (default: the active one). */
+/** {type:'bench', reps?, backend?: 'js'|'webgpu', activity?: boolean, trace?: boolean} → per-forward latency of the requested engine (default: the active one). */
 async function handleBench(msg) {
   requireBrain();
   chess.reset();
@@ -317,10 +387,10 @@ async function handleBench(msg) {
   const reps = msg.reps || 5;
   const useGpu = msg.backend ? msg.backend === 'webgpu' && !!gpu : !!gpu;
   if (msg.backend === 'webgpu' && !gpu) throw new Error(`WebGPU engine not available: ${gpuError}`);
-  const opts = { activity: msg.activity !== false };
+  const opts = { activity: msg.activity !== false, trace: msg.trace ? sampleIdx : null };
   const engine = useGpu ? gpu : brain;
   const t0 = performance.now();
   for (let i = 0; i < reps; i++) await settle(engine.forward(x, opts));
   const ms = (performance.now() - t0) / reps;
-  self.postMessage({ type: 'bench', id: msg.id, forwardMs: ms, stepMs: engine.lastStepMs, backend: useGpu ? 'webgpu' : 'js', reps });
+  self.postMessage({ type: 'bench', id: msg.id, forwardMs: ms, stepMs: engine.lastStepMs, backend: useGpu ? 'webgpu' : 'js', reps, trace: !!msg.trace });
 }

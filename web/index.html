@@ -13,7 +13,7 @@
 
 <header class="topbar">
   <a class="brand" href="#" id="brand"><span class="brand-fly" aria-hidden="true"></span><span>fly<em>chess</em></span></a>
-  <div class="specimen mono" id="specimen" title="the network you are playing">specimen <b id="spec-name">—</b> · <span id="spec-neurons">—</span> neurons · <span id="spec-synapses">—</span> connections · engine <b id="spec-engine">—</b></div>
+  <div class="specimen mono" id="specimen" title="the network you are playing">specimen <b id="spec-name">—</b> · <span id="spec-neurons">—</span> neurons · <span id="spec-synapses">—</span> connections<span id="spec-eyes" hidden> · eyes: <b id="spec-eyes-n">—</b> photoreceptors</span> · engine <b id="spec-engine">—</b></div>
   <nav class="topbar-actions">
     <button class="btn btn-ghost" id="btn-leaderboard" type="button"><span class="full">leaderboard</span><span class="short">scores</span></button>
     <button class="btn btn-ghost" id="btn-party" type="button"><span class="full">party mode</span><span class="short">party</span></button>
@@ -37,10 +37,12 @@
         <b id="lede-neurons">~134,000</b> neurons and <b id="lede-synapses">~2.7 million</b> neuron-to-neuron connections (<span id="lede-connections-note">34 million synapses in</span> the wiring diagram), wired exactly as in the animal.
         Only the synaptic strengths were trained. It is not a chess engine. It is a fly.
       </p>
+      <p class="lede lede-eyes" id="lede-eyes" hidden></p>
       <ul class="facts mono">
         <li>every connection exists in the real fly (≥ 5 synapses between the pair)</li>
         <li>excitatory / inhibitory signs from real neurotransmitters</li>
         <li>runs entirely in your browser</li>
+        <li id="fact-eyes" hidden>it looks at the board through its compound eyes</li>
       </ul>
     </div>
   </div>
@@ -106,8 +108,30 @@
       <div class="valuebar-track"><div class="valuebar-fill" id="value-fill"></div></div>
       <span class="mono dim">smug</span>
     </div>
+    <div class="eye" id="eye-panel">
+      <div class="eye-head mono">
+        <span class="eye-title">fly's eye</span>
+        <span class="eye-toggle" role="group" aria-label="eye view">
+          <button type="button" class="eye-mode" data-eye-mode="sees" aria-pressed="true" title="each photoreceptor coloured by the square it watches">sees</button>
+          <button type="button" class="eye-mode" data-eye-mode="feels" aria-pressed="false" title="each photoreceptor by the input current it receives from the board (its learned tuning)">feels</button>
+        </span>
+      </div>
+      <div class="eye-view">
+        <canvas id="eye-canvas" aria-label="the fly's two compound eyes, each photoreceptor coloured by the board square it looks at"></canvas>
+        <div class="eye-tip mono" hidden></div>
+      </div>
+      <p class="eye-caption mono"></p>
+      <p class="eye-note mono"></p>
+    </div>
     <div class="brainviz">
       <canvas id="brain-canvas" aria-label="live neuron activity of the fly brain"></canvas>
+      <div class="replay mono" id="replay" hidden>
+        <button class="replay-btn" id="replay-play" type="button" aria-label="replay the fly's thought" title="replay the 16 recurrent timesteps">▶</button>
+        <input class="replay-scrub" id="replay-scrub" type="range" min="0" max="15" step="0.01" value="15" aria-label="timestep">
+        <span class="replay-step" id="replay-step">step 16 / 16</span>
+        <button class="btn btn-ghost btn-tiny" id="replay-look" type="button" title="ask the network to look at the current position again and replay its thought">look again</button>
+      </div>
+      <canvas class="strip-canvas" id="strip-canvas" aria-label="mean activity per neuron class across the recurrent timesteps" hidden></canvas>
       <div class="brainviz-caption mono">
         <span id="brain-caption">2,048 sampled neurons · real connectome positions</span>
       </div>
@@ -215,7 +239,8 @@
     <h2>How a fly plays chess</h2>
     <p>FlyWire mapped every neuron and synapse in the brain of an adult female <i>Drosophila melanogaster</i> from electron microscopy: about 139,000 neurons and tens of millions of synapses, with the neurotransmitter of most neurons predicted from images.</p>
     <p>We turned that wiring diagram into a recurrent neural network. Each neuron is a unit; each synapse is a connection that exists <em>only</em> if the fly has it. Acetylcholine neurons excite, GABA and glutamate neurons inhibit (Dale's law), and those signs were never learned. What training changed: how strong each existing synapse is, each neuron's bias and time constant, and two small projections — the board is injected into ~2,000 sensory neurons, and the move is read out of ~2,000 descending and motor neurons.</p>
-    <p>The board is presented for a few recurrent timesteps; the descending neurons' activity is decoded into a probability over moves (the policy) and a guess of who is winning (the value). The dots beside the board are 2,048 of those neurons, drawn where they sit in the real brain, glowing with their activity.</p>
+    <p id="about-eyes" hidden></p>
+    <p>The board is presented for a few recurrent timesteps; the descending neurons' activity is decoded into a probability over moves (the policy) and a guess of who is winning (the value). The dots beside the board are 2,048 of those neurons, drawn where they sit in the real brain, glowing with their activity; after every fly move the <em>thought replay</em> scrubs through the timesteps so you can watch the wave travel from the eyes through the optic lobes into the central brain and down to the descending neurons.</p>
     <p>It learned by imitating 57 million positions from about 780,000 human games on Lichess (both players rated 1800+). <b>Larva</b> samples the policy. <b>Fly</b> takes the policy's favourite move and checks it one ply ahead with the value head. <b>Superfly</b> runs a Monte-Carlo tree search (400 simulations per move on WebGPU, 40 in plain JavaScript) where every evaluation is the fly brain. Nothing else picks moves.</p>
     <p class="dim">Data: FlyWire consortium, Dorkenwald et al. 2024 (<i>Nature</i>, doi:10.1038/s41586-024-07558-y) and Schlegel et al. 2024 (<i>Nature</i>, doi:10.1038/s41586-024-07686-5), CC BY-NC 4.0. Chess rules: chess.js (BSD-2). Code: MIT.</p>
     <div class="row"><button class="btn" type="submit">Close</button></div>

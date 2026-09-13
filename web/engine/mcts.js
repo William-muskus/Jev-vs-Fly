@@ -6,7 +6,9 @@
 // repetition count of encoding.js (checkmate = -1 for the mover, any draw = 0). One chess.js instance is reused: moves are played along the selected
 // path and undone on the way back.
 //
-// No chess knowledge lives here except the rules; every evaluation is the network's.
+// No chess knowledge lives here except the rules; every evaluation is the network's. Every leaf
+// evaluation asks for `{activity: false}` (no hidden-state / retina-drive readback and no activity
+// trace): the search only needs the policy and the value, whatever features the blob carries.
 //
 // The brain may be synchronous (FlyBrain: forward() returns the result) or asynchronous
 // (FlyBrainGPU: forward() returns a promise). `step()` returns a boolean for the former and a

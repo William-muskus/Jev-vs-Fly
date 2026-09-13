@@ -201,7 +201,16 @@ leaks, input/output projections, 3-D neuron positions) and a gzipped copy. In th
 - `engine/mcts.js` is the same PUCT search as Python for *superfly*;
 - everything runs in a Web Worker; the page shows the board, the fly's mood, live neuron activity at
   connectome coordinates, commentary from the policy/value, a share card, a local leaderboard and a
-  pass-and-play party mode.
+  pass-and-play party mode;
+- with a fly3-style export the page also shows **what the fly sees**: a *fly's eye* panel draws both
+  compound eyes from the blob's retina map (`retina_uv`), every photoreceptor coloured by the board square
+  it watches from the fly's own side (its pieces amber, yours blue) or, in *feels* mode, by the input
+  current `w_ret · board + b_ret` it actually receives; hovering names the photoreceptor (R1-6 / R7 / R8,
+  eye, square). After every fly move a **thought replay** scrubs the sampled neurons' activity through
+  the 16 recurrent timesteps, with a strip chart of the mean activity per super class showing the wave
+  travel eyes → optic lobe → central brain → descending neurons, and the commentary occasionally reports
+  which eye and square changed most in the retina's input (`docs/website-eye.png`,
+  `docs/website-replay.png`). A retina-less export (fly2) keeps working: the panel becomes a one-line note.
 
 **It is not a fake.** `fly export-web` also writes `tests/vectors/model.json`: reference logits and
 values computed with numpy *from the exported f16 bytes* for 12 curated positions (black to move,

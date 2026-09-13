@@ -25,11 +25,13 @@ const CHROME = findChrome();
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // ------------------------------------------------------------------ static server (web/ + model)
-const model = synthModel();
-const serve = { model: true };
+// a fly3-style blob with a small retina (the eye panel) and, for the retina-less path, a pre-feature blob like fly2
+const models = { retina: synthModel({ nRet: 16, seed: 3 }), legacy: synthModel({ legacy: true }) };
+const serve = { model: true, legacy: false };
 const server = createServer((req, res) => {
   const path = decodeURIComponent(new URL(req.url, 'http://x').pathname);
   if (path.startsWith('/model/')) {
+    const model = serve.legacy ? models.legacy : models.retina;
     if (!serve.model) { res.writeHead(404); res.end('no model'); return; }
     if (path === '/model/brain.json') { res.writeHead(200, { 'content-type': MIME['.json'] }); res.end(JSON.stringify(model.header)); return; }
     if (path === '/model/brain.flyb') { res.writeHead(200, { 'content-type': MIME['.flyb'], 'content-length': model.blob.byteLength }); res.end(model.blob); return; }
@@ -202,6 +204,89 @@ test('a dead worker is restarted by Retry and the game resumes', opts, async () 
   await humanMove('d2', 'd4');                                           // the restarted worker keeps working
   await page.waitFor(HUMAN_TURN);
   assert.equal((await page.eval(SNAP)).hist.length, 4);
+});
+
+const EYE = `(() => { const a = window.flychess, $ = (i) => document.getElementById(i), eye = a.eye; return {
+  none: $('eye-panel').classList.contains('eye-none'), note: document.querySelector('.eye-note').textContent, caption: document.querySelector('.eye-caption').textContent,
+  retina: eye.retina ? eye.retina.n : null, laidOut: !!eye.layout && eye.layout.x.length, flyColor: eye.flyColor, drive: eye.drive ? eye.drive.length : null, mode: eye.mode,
+  pulse: eye.pulse.squares, tip: $('eye-panel').querySelector('.eye-tip').hidden ? null : $('eye-panel').querySelector('.eye-tip').textContent,
+  specEyes: $('spec-eyes').hidden ? null : $('spec-eyes').textContent, lede: $('lede-eyes').hidden ? null : $('lede-eyes').textContent, about: $('about-eyes').hidden ? null : $('about-eyes').textContent,
+  replay: !$('replay').hidden, step: $('replay-step').textContent, playing: a.viz.playing, pos: a.viz.pos, steps: a.viz.steps, hasTrace: a.viz.hasTrace,
+  strip: !$('strip-canvas').hidden, groups: a.groups.map((g) => g.name), stripRows: a.strip.groups.length, brainCaption: $('brain-caption').textContent }; })()`;
+
+test('the eye panel shows the retina from the fly\'s side, its glance after each move, and the thought replay', opts, async () => {
+  await loadPage();
+  let e = await page.eval(EYE);
+  assert.equal(e.none, false); assert.equal(e.retina, 16);
+  assert.match(e.specEyes, /eyes: 16 photoreceptors/);
+  assert.match(e.lede, /16 photoreceptors/); assert.match(e.lede, /left eye sees files/);
+  assert.match(e.about, /The eyes\./);
+  assert.ok(e.groups.includes('retina'), `the strip chart has a retina row: ${e.groups}`);
+  await startGame({ color: 'white' });
+  await page.waitFor(`!!window.flychess.eye.layout`, { what: 'eye canvas layout (ResizeObserver after the game screen appears)' });
+  e = await page.eval(EYE);
+  assert.equal(e.flyColor, 'b', 'the fly plays black: its photoreceptors see the mirrored board');
+  assert.equal(e.laidOut, 16, 'every photoreceptor is placed on the canvas');
+  assert.equal(e.drive, null, 'the fly has not looked yet');
+  assert.match(e.caption, /amber = its pieces/);
+  await humanMove('e2', 'e4');
+  await page.waitFor(HUMAN_TURN);
+  e = await page.eval(EYE);
+  assert.equal(e.drive, 16, 'the retina drive of the position the fly looked at');
+  assert.deepEqual(e.pulse.length, 2, 'the last move\'s squares pulse');
+  assert.equal(e.replay, true); assert.equal(e.strip, true); assert.equal(e.hasTrace, true); assert.equal(e.steps, 3);
+  assert.ok(e.stripRows >= 2, 'strip rows');
+  assert.match(e.brainCaption, /3 timesteps/);
+  await page.waitFor(`!window.flychess.viz.playing`, { what: 'replay to finish' });
+  e = await page.eval(EYE);
+  assert.equal(e.step, 'step 3 / 3'); assert.equal(e.pos, 2);
+  await page.eval(`window.flychess.viz.seek(0.5), true`);
+  e = await page.eval(EYE);
+  assert.equal(e.step, 'step 1 / 3'); assert.equal(e.pos, 0.5);
+  assert.equal(await page.eval(`document.getElementById('replay-scrub').value`), '0.5', 'the scrubber follows');
+  await page.click('#replay-play');
+  assert.equal((await page.eval(EYE)).playing, true);
+  await page.waitFor(`!window.flychess.viz.playing`, { what: 'replay to finish' });
+  assert.equal((await page.eval(EYE)).step, 'step 3 / 3');
+  // feels: the drive colours the photoreceptors; hover names one
+  await page.click('[data-eye-mode=feels]');
+  e = await page.eval(EYE);
+  assert.equal(e.mode, 'feels'); assert.match(e.caption, /input current per photoreceptor/); assert.match(e.caption, /move 1/);
+  const at = await page.eval(`(() => { const a = window.flychess; const r = a.eye.canvas.getBoundingClientRect(); return { x: r.left + a.eye.layout.x[0], y: r.top + a.eye.layout.y[0] }; })()`);
+  await page.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: at.x, y: at.y });
+  await page.waitFor(`!document.querySelector('.eye-tip').hidden`, { what: 'eye tooltip' });
+  e = await page.eval(EYE);
+  assert.match(e.tip, /^R(1-6|7|8) · (left|right) eye · sees [a-h][1-8] · .* · drive [-+]\d/);
+  await page.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 5, y: 5 });
+  // "look again" evaluates the current position and replays it; undo forgets the glance
+  await page.click('#replay-look');
+  await page.waitFor(`window.flychess.viz.playing`, { what: 'look-again replay' });
+  await page.waitFor(`!window.flychess.viz.playing`);
+  await page.click('#btn-undo');
+  e = await page.eval(EYE);
+  assert.equal(e.drive, null, 'undo clears the fly\'s last glance');
+  assert.equal((await page.eval(SNAP)).hist.length, 0);
+  assert.deepEqual(page.errors, [], 'no uncaught page errors');
+});
+
+test('a retina-less specimen (fly2-style blob) hides the eye map with a note and still replays its thought', opts, async () => {
+  serve.legacy = true;
+  try {
+    await loadPage();
+    let e = await page.eval(EYE);
+    assert.equal(e.none, true); assert.equal(e.retina, null);
+    assert.match(e.note, /no retina wiring/);
+    assert.equal(e.specEyes, null); assert.equal(e.lede, null); assert.equal(e.about, null);
+    assert.ok(!e.groups.includes('retina'));
+    await startGame({ color: 'white' });
+    await humanMove('e2', 'e4');
+    await page.waitFor(HUMAN_TURN);
+    e = await page.eval(EYE);
+    assert.equal(e.drive, null); assert.equal(e.none, true);
+    assert.equal(e.replay, true); assert.equal(e.hasTrace, true);
+    assert.equal((await page.eval(SNAP)).hist.length, 2);
+    assert.deepEqual(page.errors, [], 'no uncaught page errors');
+  } finally { serve.legacy = false; }
 });
 
 test('a failed download shows a visitor message with a working Retry', opts, async () => {

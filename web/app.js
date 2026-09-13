@@ -5,6 +5,8 @@
 import { Chess } from './vendor/chess.js';
 import { Board } from './board.js';
 import { repetitionCount } from './engine/encoding.js';
+import { BrainCanvas, ClassStrip, sampleGroups } from './brainviz.js';
+import { EyePanel, squareDrive, gazeShift, gazeLine, typeCounts, eyeFiles } from './eye.js';
 
 const $ = (id) => document.getElementById(id);
 const DIFF_LABEL = { larva: 'Larva', fly: 'Fly', superfly: 'Superfly' };
@@ -102,7 +104,7 @@ class Brain {
     });
   }
 
-  move(fen, moves, difficulty) { return this._request({ type: 'move', fen, moves, difficulty }); }
+  move(fen, moves, difficulty) { return this._request({ type: 'move', fen, moves, difficulty, trace: true }); }
   eval(fen, moves) { return this._request({ type: 'eval', fen, moves }); }
 
   /** Abandon every in-flight move request: the worker stops a running superfly search within a few
@@ -176,133 +178,6 @@ class Sounds {
   }
 }
 
-// ============================================================================ brain canvas
-const CLASS_COLORS = {
-  optic: [86, 196, 150], central: [233, 166, 58], sensory: [139, 224, 90], visual_projection: [96, 210, 220],
-  visual_centrifugal: [120, 170, 240], ascending: [255, 203, 107], descending: [255, 120, 70], motor: [255, 80, 70],
-  sensory_ascending: [190, 240, 120], endocrine: [240, 130, 200], unknown: [150, 150, 150],
-};
-class BrainCanvas {
-  constructor(canvas) {
-    this.canvas = canvas;
-    this.ctx = canvas.getContext('2d');
-    this.sample = null; this.silhouette = null; this.legend = [];
-    this.values = null; this.target = null; this.from = null; this.tStart = 0;
-    this.pulse = 0; this.thinking = false;
-    this.sprites = {};
-    this.raf = 0;
-    this.bounds = null;
-    new ResizeObserver(() => this._resize()).observe(canvas);
-    this._resize();
-  }
-
-  setData(sample, silhouette, legend) {
-    this.sample = sample; this.silhouette = silhouette; this.legend = legend || [];
-    const xs = silhouette.xy;
-    let minX = 1, maxX = 0, minY = 1, maxY = 0;
-    for (let i = 0; i < xs.length; i += 2) { minX = Math.min(minX, xs[i]); maxX = Math.max(maxX, xs[i]); minY = Math.min(minY, xs[i + 1]); maxY = Math.max(maxY, xs[i + 1]); }
-    this.bounds = { minX, maxX: Math.max(maxX, minX + 1e-3), minY, maxY: Math.max(maxY, minY + 1e-3) };
-    this.values = new Float32Array(sample.idx.length);
-    this.target = new Float32Array(sample.idx.length);
-    this._draw();
-  }
-
-  colorOf(cls) {
-    const name = this.legend[cls] || 'unknown';
-    return CLASS_COLORS[name] || CLASS_COLORS.unknown;
-  }
-
-  /** New activity sample from the network: animate towards it. */
-  setActivity(values) {
-    if (!this.sample || !values) return;
-    // normalise: log-compress and scale by a robust maximum
-    const v = new Float32Array(values.length);
-    let max = 0;
-    for (let i = 0; i < v.length; i++) { v[i] = Math.log1p(Math.abs(values[i])); if (v[i] > max) max = v[i]; }
-    const sorted = Float32Array.from(v).sort();
-    const p97 = sorted[Math.floor(sorted.length * 0.97)] || max || 1;
-    for (let i = 0; i < v.length; i++) v[i] = Math.min(1, v[i] / p97);
-    this.from = Float32Array.from(this.values);
-    this.target = v; this.tStart = performance.now();
-    this._loop();
-  }
-
-  setThinking(on) { this.thinking = on; if (on) this._loop(); }
-
-  _resize() {
-    const dpr = Math.min(devicePixelRatio || 1, 2);
-    const w = this.canvas.clientWidth, h = this.canvas.clientHeight;
-    if (!w || !h) return;
-    this.canvas.width = Math.round(w * dpr); this.canvas.height = Math.round(h * dpr);
-    this.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    this.w = w; this.h = h;
-    this._draw();
-  }
-
-  _sprite(cls) {
-    if (this.sprites[cls]) return this.sprites[cls];
-    const [r, g, b] = this.colorOf(cls);
-    const c = document.createElement('canvas'); c.width = c.height = 32;
-    const x = c.getContext('2d');
-    const grad = x.createRadialGradient(16, 16, 0, 16, 16, 16);
-    grad.addColorStop(0, `rgba(${r},${g},${b},1)`); grad.addColorStop(0.25, `rgba(${r},${g},${b},.7)`); grad.addColorStop(1, `rgba(${r},${g},${b},0)`);
-    x.fillStyle = grad; x.fillRect(0, 0, 32, 32);
-    this.sprites[cls] = c;
-    return c;
-  }
-
-  _project(x, y) {
-    const b = this.bounds, pad = 10;
-    const sx = (this.w - 2 * pad) / (b.maxX - b.minX), sy = (this.h - 2 * pad) / (b.maxY - b.minY);
-    const s = Math.min(sx, sy);
-    const ox = (this.w - s * (b.maxX - b.minX)) / 2, oy = (this.h - s * (b.maxY - b.minY)) / 2;
-    return [ox + (x - b.minX) * s, oy + (y - b.minY) * s];
-  }
-
-  _loop() {
-    if (this.raf) return;
-    const step = () => {
-      this.raf = 0;
-      const t = performance.now();
-      const k = Math.min(1, (t - this.tStart) / 500);
-      if (this.from && this.target) for (let i = 0; i < this.values.length; i++) this.values[i] = this.from[i] + (this.target[i] - this.from[i]) * k;
-      this.pulse = this.thinking ? 0.5 + 0.5 * Math.sin(t / 130) : Math.max(0, this.pulse - 0.05);
-      this._draw(t);
-      if (this.thinking || k < 1 || this.pulse > 0) this.raf = requestAnimationFrame(step);
-    };
-    this.raf = requestAnimationFrame(step);
-  }
-
-  _draw(t = performance.now()) {
-    const ctx = this.ctx;
-    if (!this.w) return;
-    ctx.clearRect(0, 0, this.w, this.h);
-    if (!this.silhouette) return;
-    // silhouette: the shape of the brain, dim
-    const sil = this.silhouette;
-    for (let i = 0; i < sil.cls.length; i++) {
-      const [r, g, b] = this.colorOf(sil.cls[i]);
-      const [px, py] = this._project(sil.xy[2 * i], sil.xy[2 * i + 1]);
-      ctx.fillStyle = `rgba(${r},${g},${b},.13)`;
-      ctx.fillRect(px, py, 1.2, 1.2);
-    }
-    // sampled neurons glowing with activity
-    const s = this.sample;
-    ctx.globalCompositeOperation = 'lighter';
-    for (let i = 0; i < s.cls.length; i++) {
-      let a = this.values[i];
-      if (this.thinking) a = Math.min(1, a * 0.7 + 0.35 * this.pulse * (0.5 + 0.5 * Math.sin(t / 220 + i * 0.37)));
-      if (a < 0.03) continue;
-      const [px, py] = this._project(s.xy[2 * i], s.xy[2 * i + 1]);
-      const size = 3 + 9 * a;
-      ctx.globalAlpha = 0.25 + 0.75 * a;
-      ctx.drawImage(this._sprite(s.cls[i]), px - size / 2, py - size / 2, size, size);
-    }
-    ctx.globalAlpha = 1;
-    ctx.globalCompositeOperation = 'source-over';
-  }
-}
-
 // ============================================================================ commentary & mood
 const MOUTHS = {
   thinking: 'M95 73 H105', confident: 'M94 72 Q100 78 106 72', smug: 'M93 73 Q100 77 108 69',
@@ -359,6 +234,9 @@ class App {
     this.chess = new Chess();
     this.board = null;
     this.viz = new BrainCanvas($('brain-canvas'));
+    this.strip = new ClassStrip($('strip-canvas'));
+    this.eye = new EyePanel($('eye-panel'));
+    this.groups = [];          // strip-chart rows: sampled neurons per super class (+ retina)
     this.flySvg = '';
     this.state = null;
     this.party = null;
@@ -422,6 +300,9 @@ class App {
       $('lede-neurons').textContent = fmtInt(h.n); $('lede-synapses').textContent = `${(h.nnz / 1e6).toFixed(2)} million`;
       this.viz.setData(info.sample, info.silhouette, info.legend);
       this._renderLegend(info);
+      this.groups = sampleGroups(info.sample.idx, info.sample.cls, info.legend, info.retina?.idx);
+      this.eye.setRetina(info.retina);
+      this._describeEyes(info);
       $('brain-caption').textContent = `${fmtInt(info.sample.idx.length)} of ${fmtInt(h.n)} neurons · real connectome positions`;
       $('btn-start').disabled = false;
       $('btn-start').querySelector('.btn-start-label').textContent = 'Play the fly';
@@ -439,6 +320,19 @@ class App {
       $('btn-retry-load').addEventListener('click', () => this._startLoading({ retry: true }));
       $('btn-start').querySelector('.btn-start-label').textContent = 'No fly brain found';
     });
+  }
+
+  /** Photoreceptor counts and eye → files coverage from the header (specimen line, landing page, about). */
+  _describeEyes(info) {
+    const R = info.retina;
+    $('spec-eyes').hidden = !R;
+    $('lede-eyes').hidden = !R; $('fact-eyes').hidden = !R; $('about-eyes').hidden = !R;
+    if (!R) return;
+    $('spec-eyes-n').textContent = fmtInt(R.n);
+    const files = eyeFiles(R.square, R.eye);
+    const types = typeCounts(R.type, R.legend).filter(([, c]) => c > 0).map(([t, c]) => `${fmtInt(c)} ${t}`).join(', ');
+    $('lede-eyes').innerHTML = `It also has eyes: <b>${fmtInt(R.n)}</b> photoreceptors of the fly's two compound eyes (${escapeHtml(types)}) each watch one square of the board — the left eye sees files ${files.left}, the right eye files ${files.right} — and the picture travels through the real lamina, medulla and lobula before the central brain hears about it.`;
+    $('about-eyes').innerHTML = `<b>The eyes.</b> This specimen also sees. ${fmtInt(R.n)} photoreceptors (${escapeHtml(types)}) sit on the ommatidial columns of the two compound eyes mapped by FlyWire; every photoreceptor looks at exactly one board square — the left eye covers files ${files.left} (${fmtInt(files.leftCount)} photoreceptors), the right eye files ${files.right} (${fmtInt(files.rightCount)}) — and receives the twenty board planes of that square through a tiny learned tuning, nothing else. The signal then has to cross the real lamina → medulla → lobula wiring to reach the central brain. The <i>fly's eye</i> panel beside the board shows what each photoreceptor watches and, in <i>feels</i> mode, the actual input current it receives.`;
   }
 
   _renderLegend(info) {
@@ -500,6 +394,45 @@ class App {
       if (e.key === 'z' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); this.undo(); }
     });
     this.brain.onThinking = (m) => { $('clk-sims').textContent = `${m.done}/${m.total}`; };
+    // thought replay: scrubber + play button follow the brain canvas
+    const scrub = $('replay-scrub'), stepEl = $('replay-step'), playBtn = $('replay-play');
+    this.viz.onReplay = (pos, steps, playing) => {
+      scrub.max = String(steps - 1);
+      if (document.activeElement !== scrub || !playing) scrub.value = String(pos);
+      stepEl.textContent = `step ${Math.min(steps, Math.floor(pos + 1e-6) + 1)} / ${steps}`;
+      playBtn.textContent = playing ? '❚❚' : '▶';
+      playBtn.setAttribute('aria-label', playing ? 'pause the replay' : "replay the fly's thought");
+      this.strip.setPos(pos);
+    };
+    scrub.addEventListener('input', () => this.viz.seek(+scrub.value));
+    playBtn.addEventListener('click', () => this.viz.toggle());
+    $('replay-look').addEventListener('click', () => this.lookAgain());
+  }
+
+  /** A trace (steps × sample) from the worker: replay it on the brain canvas and the class strip. */
+  showTrace(trace, steps, { autoplay = true } = {}) {
+    if (!trace || !steps || !this.viz.sample || trace.length !== steps * this.viz.sample.idx.length) { this.hideTrace(); return; }
+    $('replay').hidden = false; $('strip-canvas').hidden = false;
+    $('strip-canvas').parentElement.classList.add('has-trace');
+    this.strip.setTrace(trace, steps, this.groups);
+    this.viz.setTrace(trace, steps, { autoplay });
+    $('brain-caption').textContent = `${fmtInt(this.viz.sample.idx.length)} sampled neurons · ${steps} timesteps · mean |activity| per class`;
+  }
+
+  hideTrace() { $('replay').hidden = true; $('strip-canvas').hidden = true; $('strip-canvas').parentElement.classList.remove('has-trace'); }
+
+  /** "look again": ask the network to evaluate the current position and replay that thought (no move is made). */
+  async lookAgain() {
+    const s = this.state;
+    if (!s || s.thinking) return;
+    const btn = $('replay-look'); btn.disabled = true;
+    try {
+      const r = await this.brain.eval(this.chess.fen(), s.moves.slice());
+      if (this.state !== s || s.thinking) return;
+      this.showTrace(r.trace, r.traceSteps);
+      if (r.backend) this._showBackend(r.backend);
+    } catch (err) { this.toast(`The fly would not look (${err.message})`); }
+    finally { btn.disabled = false; }
   }
 
   showLanding() {
@@ -535,6 +468,10 @@ class App {
     } else this.board.setOrientation(color);
     this.board.setPosition(this.chess.fen(), { animate: false });
     this.board.highlight({ lastMove: null, check: null });
+    this.eye.setGame(this.state.human === 'w' ? 'b' : 'w');
+    this.eye.setBoard(this.chess.fen(), null);
+    this.glance = null;                       // per-(eye, square) drive of the fly's previous look, for the gaze commentary
+    this.hideTrace();
     $('screen-landing').hidden = true; $('screen-game').hidden = false;
     $('diff-pill').textContent = DIFF_LABEL[opts.difficulty];
     $('clk-last').textContent = '—'; $('clk-total').textContent = '0.0 s'; $('clk-sims').textContent = opts.difficulty === 'superfly' ? '0 sims' : '—';
@@ -548,7 +485,8 @@ class App {
     else this.brain.eval(this.chess.fen(), []).then((r) => {
       // the fly's opinion of the start position: value is the mover's (yours), so flip it for the fly
       if (this.state && this.state.moves.length === 0 && !this.state.thinking) {
-        this.viz.setActivity(r.activitySample); this.setValue(-r.value);
+        if (r.trace) this.showTrace(r.trace, r.traceSteps); else this.viz.setActivity(r.activitySample);
+        this.setValue(-r.value);
         this.setMood(moodFor(-r.value), commentaryFor({ policyTop: r.policyTop, value: -r.value }));
       }
     }).catch(() => {});
@@ -586,6 +524,7 @@ class App {
     s.moves.push(mv.from + mv.to + (mv.promotion || ''));
     this.board.setPosition(this.chess.fen());
     this.board.highlight({ lastMove: [mv.from, mv.to] });
+    this.eye.setBoard(this.chess.fen(), mv.from + mv.to);
     this.sounds.click(mv.captured ? 'capture' : 'move');
     this.renderMoves();
     const over = this.checkGameOver();
@@ -638,10 +577,30 @@ class App {
     $('clk-last').textContent = fmtMs(r.thinkMs); $('clk-total').textContent = fmtMs(s.thinkTotal);
     $('clk-sims').textContent = s.difficulty === 'superfly' ? `${r.sims} sims` : (r.sims ? `1-ply × ${r.sims}` : 'policy only');
     if (r.backend) this._showBackend(r.backend);
-    this.viz.setActivity(r.activitySample);
+    if (r.trace) this.showTrace(r.trace, r.traceSteps); else this.viz.setActivity(r.activitySample);
     this.setValue(r.value);
-    this.setMood(moodFor(r.value), commentaryFor({ policyTop: r.policyTop, value: r.value, san: mv.san, difficulty: s.difficulty, sims: r.sims }));
+    let text = commentaryFor({ policyTop: r.policyTop, value: r.value, san: mv.san, difficulty: s.difficulty, sims: r.sims });
+    const gaze = this.seeGaze(r.retinaDrive, s.moves.length);
+    if (gaze && Math.random() < 0.45) text += ` ${gaze}`;
+    this.setMood(moodFor(r.value), text);
     this.applyMove(mv);
+  }
+
+  /**
+   * The retina drive of the position the fly just looked at (it was the side to move, so the
+   * photoreceptors' squares are in its own perspective): feed the eye panel and, comparing with the
+   * previous glance, find the (eye, square) whose input current changed most — a commentary line
+   * driven purely by the network's inputs.
+   */
+  seeGaze(drive, ply) {
+    if (!drive || !this.eye.hasRetina) return '';
+    const R = this.eye.retina;
+    const moveNo = Math.floor(ply / 2) + 1;
+    this.eye.setDrive(drive, `at its last glance (move ${moveNo})`);
+    const cur = squareDrive(drive, R.square, R.eye);
+    const shift = gazeShift(this.glance, cur);
+    this.glance = cur;
+    return gazeLine(shift, this.eye.board, this.eye.flyColor);
   }
 
   /** Persistent way out of a failed fly move (a toast alone would leave the board locked forever). */
@@ -675,6 +634,8 @@ class App {
     this.board.setPosition(this.chess.fen());
     const last = this.chess.history({ verbose: true }).at(-1);
     this.board.highlight({ lastMove: last ? [last.from, last.to] : null });
+    this.eye.setBoard(this.chess.fen(), last ? last.from + last.to : null);
+    this.eye.setDrive(null); this.glance = null;
     this.renderMoves();
     this.updateTurn();
     this.setMood('curious', 'The fly pretends that never happened.');

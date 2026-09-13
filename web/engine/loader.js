@@ -5,6 +5,11 @@
 // Offsets are 8-byte aligned so every typed-array view can be created directly on the buffer.
 // f16 arrays are decoded once, on load, into Float32Array (table-driven decoder);
 // i8 arrays are dequantised with their `scale` (scalar or per-row array).
+//
+// The optional-feature arrays of SPEC §8 (retina_*, w_ret, b_ret, mod_*, central_*) are parsed by the
+// same uniform loop — a feature that is off is exported with zero length, and a blob written before
+// they existed simply lacks them; `modelFeatures` turns header flags + arrays into the switches the
+// engines run on, so old blobs keep working unchanged (every feature off).
 
 /** @typedef {{name:string, dtype:string, shape:number[], offset:number, length_bytes:number, scale?:number|number[]}} ArraySpec */
 
@@ -99,6 +104,46 @@ export function parseArrays(header, buffer) {
     }
   }
   return arrays;
+}
+
+/**
+ * The optional features a blob relies on (SPEC §8), resolved from the header flags AND the arrays:
+ * a flag is only honoured when its arrays are present and non-empty, so a header claiming `vision`
+ * without photoreceptors runs as a plain blob (like flychess.export.numpy_forward).
+ * @param {object} header
+ * @param {Record<string, any>} arrays  parsed arrays
+ * @returns {{vision: boolean, sensoryInput: boolean, readoutSteps: number[], neuromod: boolean, centralDim: number,
+ *            nRet: number, nCentral: number, numPlanes: number, steps: number, headIn: number}}
+ */
+export function modelFeatures(header, arrays) {
+  const steps = Number(header.steps ?? 8);
+  const numPlanes = Number(header.num_planes ?? ((header.input_dim ?? 1280) / 64));
+  const nRet = arrays.retina_idx ? arrays.retina_idx.length : 0;
+  const vision = !!header.vision && nRet > 0;
+  // sensory_input=false exports w_in with zero rows (input_idx is kept for the visualiser)
+  const sensoryInput = header.sensory_input !== false && (arrays.w_in ? arrays.w_in.length > 0 : true);
+  const nnzMod = arrays.mod_indices ? arrays.mod_indices.length : 0;
+  const neuromod = !!header.neuromod && nnzMod > 0;
+  const centralDim = Math.max(0, Number(header.central_dim ?? 0) | 0);
+  const nCentral = centralDim > 0 && arrays.central_idx ? arrays.central_idx.length : 0;
+  let readoutSteps = Array.isArray(header.readout_steps) && header.readout_steps.length
+    ? header.readout_steps.map((t) => Number(t) | 0) : [steps];
+  for (let i = 0; i < readoutSteps.length; i++) {
+    const t = readoutSteps[i];
+    if (t < 1 || t > steps || (i > 0 && t <= readoutSteps[i - 1])) throw new Error(`readout_steps ${JSON.stringify(header.readout_steps)} must be strictly increasing within 1..${steps}`);
+  }
+  if (vision) {
+    if (arrays.retina_square.length !== nRet || arrays.b_ret.length !== nRet || arrays.w_ret.length !== nRet * numPlanes) throw new Error('retina arrays shape mismatch');
+  }
+  if (neuromod) {
+    const n = header.n ?? arrays.csr_indptr.length - 1;
+    if (arrays.mod_indptr.length !== n + 1 || arrays.w_mod.length !== nnzMod) throw new Error('mod CSR shape mismatch');
+  }
+  if (centralDim > 0) {
+    if (!arrays.central_idx || arrays.central_w.length !== centralDim * nCentral || arrays.central_b.length !== centralDim) throw new Error('central readout shape mismatch');
+  }
+  const nOut = arrays.output_idx ? arrays.output_idx.length : 0;
+  return { vision, sensoryInput, readoutSteps, neuromod, centralDim, nRet, nCentral, numPlanes, steps, headIn: nOut * readoutSteps.length + centralDim };
 }
 
 /**
