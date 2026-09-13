@@ -211,7 +211,8 @@ class BrainConfig:
     sensory_input: bool = True       # dense w_in projection into input_idx (at least one of vision / sensory_input)
     readout_steps: tuple[int, ...] = ()  # 1-based timesteps whose output_idx activity feeds the heads; () = final step
     neuromod: bool = False    # DA / SER / OCT synapses gate the others multiplicatively instead of adding
-    central_dim: int = 0      # 0 = off; else Linear(n_central, central_dim) of the final 'central' activity -> head input
+    central_dim: int = 0
+    homeostatic: bool = False # per-neuron intrinsic gain exp(log_gain) on the synaptic input, calibrated on data at init
 ```
 `readout_steps` entries must lie in `1..steps` and be strictly increasing (`effective_readout_steps` resolves `()`
 to `(steps,)`); `to_dict()` stores it as a list (YAML-safe). Old configs without the new keys get these defaults.

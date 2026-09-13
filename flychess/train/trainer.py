@@ -138,10 +138,9 @@ def build_model(cfg: TrainConfig, graph: BrainGraph | None = None,
 
 def calibrate_model(model: FlyBrain, cfg: TrainConfig, device: torch.device | str, batch: int = 256) -> dict[str, float]:
     """Run :meth:`FlyBrain.calibrate_gains` on a batch of real training positions (data-dependent init)."""
-    from flychess.data.shards import ShardDataset, collate, load_split, parse_shard_names
+    from flychess.data.shards import ShardDataset, collate, load_split
 
-    names = parse_shard_names(cfg.shard_name) if cfg.shard_name else None
-    train_files, _ = load_split(cfg.shards_dir, cfg.val_fraction, cfg.seed, names=names)
+    train_files, _ = load_split(cfg.shards_dir, cfg.val_fraction, cfg.seed, cfg.shard_name)
     it = iter(ShardDataset(train_files[:4], seed=cfg.seed + 7))
     x = collate([next(it) for _ in range(batch)])["planes"].to(device)
     return model.calibrate_gains(x)

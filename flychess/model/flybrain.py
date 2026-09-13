@@ -726,7 +726,7 @@ class FlyBrain(nn.Module):
         model.load_state_dict(state_dict, strict=strict)
         return model
 
-    def _load_from_state_dict(self, state_dict, prefix, *args, **kwargs):  # noqa: D401 - torch hook
+    def _load_from_state_dict(self, state_dict, prefix, *args, **kwargs):
         # Checkpoints written before the homeostatic gain existed: gain 1 everywhere.
         if prefix + "log_gain" not in state_dict:
             state_dict[prefix + "log_gain"] = torch.zeros_like(self.log_gain)
