@@ -13,7 +13,7 @@
 
 <header class="topbar">
   <a class="brand" href="#" id="brand"><span class="brand-fly" aria-hidden="true"></span><span>fly<em>chess</em></span></a>
-  <div class="specimen mono" id="specimen" title="the network you are playing">specimen <b id="spec-name">—</b> · <span id="spec-neurons">—</span> neurons · <span id="spec-synapses">—</span> connections</div>
+  <div class="specimen mono" id="specimen" title="the network you are playing">specimen <b id="spec-name">—</b> · <span id="spec-neurons">—</span> neurons · <span id="spec-synapses">—</span> connections · engine <b id="spec-engine">—</b></div>
   <nav class="topbar-actions">
     <button class="btn btn-ghost" id="btn-leaderboard" type="button"><span class="full">leaderboard</span><span class="short">scores</span></button>
     <button class="btn btn-ghost" id="btn-party" type="button"><span class="full">party mode</span><span class="short">party</span></button>
@@ -59,7 +59,7 @@
         </label>
         <label class="diff"><input type="radio" name="difficulty" value="superfly">
           <span class="diff-name">Superfly</span>
-          <span class="diff-desc">Same brain, 100 simulations of tree search per move. Slower and meaner.</span>
+          <span class="diff-desc">Same brain plus tree search: up to 400 simulations per move with WebGPU (40 without). Slower and meaner.</span>
         </label>
       </div>
     </div>
@@ -216,7 +216,7 @@
     <p>FlyWire mapped every neuron and synapse in the brain of an adult female <i>Drosophila melanogaster</i> from electron microscopy: about 139,000 neurons and tens of millions of synapses, with the neurotransmitter of most neurons predicted from images.</p>
     <p>We turned that wiring diagram into a recurrent neural network. Each neuron is a unit; each synapse is a connection that exists <em>only</em> if the fly has it. Acetylcholine neurons excite, GABA and glutamate neurons inhibit (Dale's law), and those signs were never learned. What training changed: how strong each existing synapse is, each neuron's bias and time constant, and two small projections — the board is injected into ~2,000 sensory neurons, and the move is read out of ~2,000 descending and motor neurons.</p>
     <p>The board is presented for a few recurrent timesteps; the descending neurons' activity is decoded into a probability over moves (the policy) and a guess of who is winning (the value). The dots beside the board are 2,048 of those neurons, drawn where they sit in the real brain, glowing with their activity.</p>
-    <p>It learned by imitating 57 million positions from about 780,000 human games on Lichess (both players rated 1800+). <b>Larva</b> samples the policy. <b>Fly</b> takes the policy's favourite move and checks it one ply ahead with the value head. <b>Superfly</b> runs a 100-simulation Monte-Carlo tree search where every evaluation is the fly brain. Nothing else picks moves.</p>
+    <p>It learned by imitating 57 million positions from about 780,000 human games on Lichess (both players rated 1800+). <b>Larva</b> samples the policy. <b>Fly</b> takes the policy's favourite move and checks it one ply ahead with the value head. <b>Superfly</b> runs a Monte-Carlo tree search (400 simulations per move on WebGPU, 40 in plain JavaScript) where every evaluation is the fly brain. Nothing else picks moves.</p>
     <p class="dim">Data: FlyWire consortium, Dorkenwald et al. 2024 (<i>Nature</i>, doi:10.1038/s41586-024-07558-y) and Schlegel et al. 2024 (<i>Nature</i>, doi:10.1038/s41586-024-07686-5), CC BY-NC 4.0. Chess rules: chess.js (BSD-2). Code: MIT.</p>
     <div class="row"><button class="btn" type="submit">Close</button></div>
   </form>

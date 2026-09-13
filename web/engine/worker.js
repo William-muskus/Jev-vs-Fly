@@ -1,40 +1,83 @@
 // worker.js — Web Worker hosting the fly brain. Every move sent back was chosen by the network
 // (SPEC §9): larva = temperature-1.2 sample of the policy, fly = argmax policy with a 1-ply
-// value-head check over the top-3 policy moves, superfly = 100-simulation PUCT MCTS (≈5 s per move on the full brain in plain JS; Python uses 200).
+// value-head check over the top-3 policy moves, superfly = 100-simulation PUCT MCTS (≈0.4 s per move
+// on the full brain with WebGPU, ≈8 s in plain JS; Python uses 200).
 //
-// Messages in:  {type:'load', baseUrl}
+// Messages in:  {type:'load', baseUrl, gpu?}   gpu:false skips WebGPU (plain-JS engine only)
 //               {type:'move', id, fen, moves:[uci...], difficulty:'larva'|'fly'|'superfly'}
 //               {type:'eval', id, fen, moves:[uci...]}
 //               {type:'cancel', id}     abandon the move request `id` (a running superfly search stops
 //                                       within a few simulations; a queued one is skipped)
+//               {type:'debug', id, op:'lose-gpu'}   tests only: destroy the WebGPU device (→ JS fallback)
 // Messages out: {type:'progress', loaded, total, phase, n, nnz, runName}
-//               {type:'ready', header, sample:{idx, xy, cls}, silhouette:{xy, cls}, legend, fromCache, bytes}
+//               {type:'ready', header, sample:{idx, xy, cls}, silhouette:{xy, cls}, legend, fromCache, bytes, backend, gpu}
+//                   backend: 'webgpu' | 'js'; gpu: {error} says why WebGPU was not used
 //               {type:'thinking', id, done, total}            (superfly only, every 10 simulations)
-//               {type:'move', id, move, san, policyTop, value, activitySample, thinkMs, sims, stepMs}
+//               {type:'move', id, move, san, policyTop, value, activitySample, thinkMs, sims, stepMs, backend}
 //               {type:'move', id, move:null, cancelled:true}  (reply to a cancelled request)
-//               {type:'eval', id, value, policyTop, activitySample}
+//               {type:'eval', id, value, policyTop, activitySample, backend}
 //               {type:'error', id?, message}
 //
 // Requests are handled strictly one at a time (they share one chess.js instance); `cancel` is the
 // only message acted on immediately.
+//
+// Backends: the worker always builds the plain-JS FlyBrain and, unless asked not to, a FlyBrainGPU
+// on the same arrays. Every forward goes through `net` (below): WebGPU when it is alive, else JS;
+// a GPU failure (device lost, out of memory, shader error) is reported once and the JS engine
+// answers that and every later request — the reply's `backend` field says which one did.
 
 import { Chess } from '../vendor/chess.js';
 import * as enc from './encoding.js';
 import { loadBrain } from './loader.js';
 import { FlyBrain, policyForLegal, sampleIndex, topK } from './flybrain.js';
+import { FlyBrainGPU } from './flybrain-gpu.js';
 import { runMCTSAsync, uciOf } from './mcts.js';
 
 const SAMPLE_N = 2048;
 const SILHOUETTE_N = 6000;
+const GPU_SETUP_TIMEOUT_MS = 20000;   // upload of ~55 MB of parameters + shader compilation takes < 1 s on a desktop GPU
 const DIFFICULTY = {
   larva: { kind: 'sample', temperature: 1.2 },
   fly: { kind: 'lookahead', topN: 3 },
-  superfly: { kind: 'mcts', sims: 100 },
+  // superfly's search budget depends on the engine: ~4 ms per forward on WebGPU vs ~85 ms in plain JS
+  superfly: { kind: 'mcts', sims: { webgpu: 400, js: 40 } },
 };
 
-let brain = null;
+function simsFor(cfg) {
+  return typeof cfg.sims === 'number' ? cfg.sims : (gpu && !gpu.lost ? cfg.sims.webgpu : cfg.sims.js);
+}
+
+let brain = null;             // FlyBrain (plain JS) — always present once loaded
+let gpu = null;               // FlyBrainGPU, or null when unavailable / lost
+let gpuError = null;          // why the GPU engine is not in use (string)
 let sampleIdx = null;         // Int32Array(SAMPLE_N) fixed at load
 const chess = new Chess();
+
+function backend() { return gpu ? 'webgpu' : 'js'; }
+
+function dropGpu(err) {
+  if (!gpu) return;
+  gpuError = String(err && err.message || err);
+  try { gpu.destroy(); } catch { /* ignore */ }
+  gpu = null;
+  self.postMessage({ type: 'backend', backend: 'js', reason: gpuError });
+}
+
+/**
+ * The network as seen by the move logic and MCTS: forward(x) returns a result synchronously from
+ * the JS engine, or a promise from WebGPU. A rejected GPU forward falls back to the JS engine for
+ * that call and all later ones.
+ */
+const net = {
+  forward(x, opts) {
+    if (!gpu) return brain.forward(x, opts);
+    return gpu.forward(x, opts).catch((err) => { dropGpu(err); return brain.forward(x, opts); });
+  },
+  get lastStepMs() { return gpu ? gpu.lastStepMs : brain.lastStepMs; },
+};
+
+/** await-if-needed: keeps the JS path free of extra microtasks */
+const settle = (r) => (r && typeof r.then === 'function' ? r : Promise.resolve(r));
 
 let queue = Promise.resolve();          // requests run one after another
 let activeSearch = null;                // {id, cancelled} while a superfly search is in flight
@@ -54,8 +97,9 @@ async function dispatch(msg) {
   try {
     if (msg.type === 'load') await handleLoad(msg);
     else if (msg.type === 'move') await handleMove(msg);
-    else if (msg.type === 'eval') handleEval(msg);
-    else if (msg.type === 'bench') handleBench(msg);
+    else if (msg.type === 'eval') await handleEval(msg);
+    else if (msg.type === 'bench') await handleBench(msg);
+    else if (msg.type === 'debug' && msg.op === 'lose-gpu') { gpu?.device.destroy(); self.postMessage({ type: 'debug', id: msg.id, backend: backend() }); }
   } catch (err) {
     self.postMessage({ type: 'error', id: msg.id, message: String(err && err.message || err) });
   }
@@ -68,6 +112,20 @@ async function handleLoad(msg) {
     self.postMessage({ type: 'progress', loaded, total, phase, n: header?.n, nnz: header?.nnz, runName: header?.run_name });
   });
   brain = new FlyBrain(model);
+  if (gpu) { try { gpu.destroy(); } catch { /* ignore */ } gpu = null; }
+  gpuError = null;
+  if (msg.gpu === false) gpuError = 'disabled by request';
+  else {
+    // a stalled adapter/device request must not hold up 'ready': give WebGPU a bounded time
+    let timer = 0;
+    const creation = FlyBrainGPU.create(model);
+    const timeout = new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(`WebGPU setup took longer than ${GPU_SETUP_TIMEOUT_MS} ms`)), GPU_SETUP_TIMEOUT_MS); });
+    try { gpu = await Promise.race([creation, timeout]); }
+    catch (err) {
+      gpu = null; gpuError = String(err && err.message || err);
+      creation.then((late) => late.destroy(), () => {});   // a late success is released, not used
+    } finally { clearTimeout(timer); }
+  }
   const n = brain.n;
   sampleIdx = spreadSample(n, Math.min(SAMPLE_N, n), 0x9e3779b9);
   const silIdx = spreadSample(n, Math.min(SILHOUETTE_N, n), 0x85ebca6b);
@@ -78,6 +136,8 @@ async function handleLoad(msg) {
     fromCache: model.fromCache,
     bytes: model.bytes,
     legend,
+    backend: backend(),
+    gpu: gpu ? { timestamps: gpu.timestamps } : { error: gpuError },
     sample: { idx: sampleIdx, xy: projectXY(brain, sampleIdx), cls: classesOf(brain, sampleIdx) },
     silhouette: { xy: projectXY(brain, silIdx), cls: classesOf(brain, silIdx) },
   });
@@ -177,7 +237,7 @@ async function handleMove(msg) {
     return;
   }
   const x = enc.encodeBoard(chess);
-  const res = brain.forward(x);
+  const res = await settle(net.forward(x));
   const probs = policyForLegal(res.policy, idx, 1);
   const act = activitySample(res.activity);
   let chosen, value = res.value, sims = 0, note = '';
@@ -194,7 +254,7 @@ async function handleMove(msg) {
       let oppValue;
       if (chess.isCheckmate()) oppValue = -1;
       else if (chess.isDraw() || enc.repetitionCount(chess) >= 3) oppValue = 0;
-      else oppValue = brain.forward(enc.encodeBoard(chess)).value;
+      else oppValue = (await settle(net.forward(enc.encodeBoard(chess), { activity: false }))).value;
       chess.undo();
       const score = -oppValue;       // our value = negated opponent value
       if (score > bestScore + 1e-9) { bestScore = score; best = i; }
@@ -206,8 +266,8 @@ async function handleMove(msg) {
     activeSearch = { id: msg.id, cancelled: false };
     let out;
     try {
-      out = await runMCTSAsync(brain, chess, enc, {
-        sims: cfg.sims, cPuct: 1.5, dirichletAlpha: 0, temperature: 0, yieldEvery: 10,
+      out = await runMCTSAsync(net, chess, enc, {
+        sims: simsFor(cfg), cPuct: 1.5, dirichletAlpha: 0, temperature: 0, yieldEvery: 10,
         shouldStop: () => activeSearch.cancelled,
         onProgress: (done, total) => { if (done % 10 === 0) self.postMessage({ type: 'thinking', id: msg.id, done, total }); },
       });
@@ -229,33 +289,38 @@ async function handleMove(msg) {
     type: 'move', id: msg.id,
     move: uciOf(chosen), san: chosen.san,
     policyTop: policyTopFrom(moves, probs, 5),
-    value, activitySample: act, thinkMs, sims, stepMs: brain.lastStepMs, note,
+    value, activitySample: act, thinkMs, sims, stepMs: net.lastStepMs, note, backend: backend(),
   });
 }
 
-function handleEval(msg) {
+async function handleEval(msg) {
   requireBrain();
   setPosition(msg.fen, msg.moves);
   const { moves, idx } = legalMoves();
   if (moves.length === 0) {
-    self.postMessage({ type: 'eval', id: msg.id, value: 0, policyTop: [], activitySample: null });
+    self.postMessage({ type: 'eval', id: msg.id, value: 0, policyTop: [], activitySample: null, backend: backend() });
     return;
   }
-  const res = brain.forward(enc.encodeBoard(chess));
+  const res = await settle(net.forward(enc.encodeBoard(chess)));
   const probs = policyForLegal(res.policy, idx, 1);
   self.postMessage({
     type: 'eval', id: msg.id, value: res.value,
-    policyTop: policyTopFrom(moves, probs, 5), activitySample: activitySample(res.activity),
+    policyTop: policyTopFrom(moves, probs, 5), activitySample: activitySample(res.activity), backend: backend(),
   });
 }
 
-function handleBench(msg) {
+/** {type:'bench', reps?, backend?: 'js'|'webgpu', activity?: boolean} → per-forward latency of the requested engine (default: the active one). */
+async function handleBench(msg) {
   requireBrain();
   chess.reset();
   const x = enc.encodeBoard(chess);
   const reps = msg.reps || 5;
+  const useGpu = msg.backend ? msg.backend === 'webgpu' && !!gpu : !!gpu;
+  if (msg.backend === 'webgpu' && !gpu) throw new Error(`WebGPU engine not available: ${gpuError}`);
+  const opts = { activity: msg.activity !== false };
+  const engine = useGpu ? gpu : brain;
   const t0 = performance.now();
-  for (let i = 0; i < reps; i++) brain.forward(x);
+  for (let i = 0; i < reps; i++) await settle(engine.forward(x, opts));
   const ms = (performance.now() - t0) / reps;
-  self.postMessage({ type: 'bench', id: msg.id, forwardMs: ms, stepMs: brain.lastStepMs });
+  self.postMessage({ type: 'bench', id: msg.id, forwardMs: ms, stepMs: engine.lastStepMs, backend: useGpu ? 'webgpu' : 'js', reps });
 }

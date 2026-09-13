@@ -29,6 +29,7 @@ class Brain {
     this.baseUrl = null;
     this.onProgress = () => {};
     this.onThinking = () => {};
+    this.onBackend = () => {};    // {backend:'webgpu'|'js', reason?} — the worker switched engines (WebGPU lost → JS)
     this._spawn();
   }
 
@@ -70,6 +71,7 @@ class Brain {
   _onMessage(msg) {
     if (msg.type === 'progress') { this.onProgress(msg); return; }
     if (msg.type === 'ready') { this.info = msg; this._resolveReady?.(msg); return; }
+    if (msg.type === 'backend') { if (this.info) this.info.backend = msg.backend; this.onBackend(msg); return; }
     if (msg.type === 'thinking') {
       const p = this.pending.get(msg.id);
       if (!p || p.cancelled) return;      // progress of an abandoned (or unknown) search must not leak into the UI
@@ -375,6 +377,14 @@ class App {
     } catch { /* decorative */ }
   }
 
+  /** "engine: WebGPU" / "engine: JS" in the specimen line (the worker reports which backend answered). */
+  _showBackend(backend) {
+    const el = $('spec-engine');
+    if (!el || !backend) return;
+    el.textContent = backend === 'webgpu' ? 'WebGPU' : 'JS';
+    el.title = backend === 'webgpu' ? 'forward pass on the GPU (WebGPU compute shaders)' : 'forward pass in plain JavaScript';
+  }
+
   _startLoading({ retry = false } = {}) {
     const fill = $('bar-fill'), bytes = $('load-bytes'), neurons = $('load-neurons').querySelector('b');
     let n = 0, shown = 0, tick = 0;
@@ -405,6 +415,8 @@ class App {
       bytes.textContent = info.fromCache ? 'from cache' : `${(info.bytes / 1e6).toFixed(1)} MB decoded`;
       $('spec-name').textContent = h.run_name || 'brain';
       $('spec-neurons').textContent = fmtInt(h.n); $('spec-synapses').textContent = fmtInt(h.nnz);
+      this._showBackend(info.backend);
+      this.brain.onBackend = (m) => this._showBackend(m.backend);
       const syn = h.total_synapses ? `${(h.total_synapses / 1e6).toFixed(1)} million synapses in` : '';
       $('lede-connections-note').textContent = syn;
       $('lede-neurons').textContent = fmtInt(h.n); $('lede-synapses').textContent = `${(h.nnz / 1e6).toFixed(2)} million`;
@@ -525,7 +537,7 @@ class App {
     this.board.highlight({ lastMove: null, check: null });
     $('screen-landing').hidden = true; $('screen-game').hidden = false;
     $('diff-pill').textContent = DIFF_LABEL[opts.difficulty];
-    $('clk-last').textContent = '—'; $('clk-total').textContent = '0.0 s'; $('clk-sims').textContent = opts.difficulty === 'superfly' ? '0/100' : '—';
+    $('clk-last').textContent = '—'; $('clk-total').textContent = '0.0 s'; $('clk-sims').textContent = opts.difficulty === 'superfly' ? '0 sims' : '—';
     $('btn-resign').disabled = false;
     this.renderMoves();
     this.renderPartyBar();
@@ -625,6 +637,7 @@ class App {
     s.lastThink = r.thinkMs; s.thinkTotal += r.thinkMs; s.sims = r.sims; s.lastValue = r.value;
     $('clk-last').textContent = fmtMs(r.thinkMs); $('clk-total').textContent = fmtMs(s.thinkTotal);
     $('clk-sims').textContent = s.difficulty === 'superfly' ? `${r.sims} sims` : (r.sims ? `1-ply × ${r.sims}` : 'policy only');
+    if (r.backend) this._showBackend(r.backend);
     this.viz.setActivity(r.activitySample);
     this.setValue(r.value);
     this.setMood(moodFor(r.value), commentaryFor({ policyTop: r.policyTop, value: r.value, san: mv.san, difficulty: s.difficulty, sims: r.sims }));
