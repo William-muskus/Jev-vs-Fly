@@ -7,7 +7,7 @@ from typing import Any
 
 import yaml
 
-ACTIVATIONS = ("relu", "gelu", "tanh")
+ACTIVATIONS = ("relu", "gelu", "tanh", "satrelu")
 DTYPES = ("float32", "bfloat16", "float16", "float64")
 
 
@@ -36,6 +36,7 @@ class BrainConfig:
     steps: int = 8
     alpha: float = 0.5
     activation: str = "relu"
+    sat: float = 10.0            # firing-rate ceiling for 'satrelu': sat * tanh(relu(x) / sat)
     input_dim: int = 1280
     num_moves: int = 4168
     weight_init_scale: float = 1.0
@@ -48,6 +49,8 @@ class BrainConfig:
             raise ValueError(f"activation must be one of {ACTIVATIONS}, got {self.activation!r}")
         if self.dtype not in DTYPES:
             raise ValueError(f"dtype must be one of {DTYPES}, got {self.dtype!r}")
+        if self.sat <= 0:
+            raise ValueError("sat must be > 0")
         if not (0.0 < self.alpha < 1.0):
             raise ValueError("alpha must lie strictly inside (0, 1)")
         if self.steps < 1:

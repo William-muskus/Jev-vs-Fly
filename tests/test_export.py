@@ -173,7 +173,7 @@ process.stdout.write(JSON.stringify(out));
 
 
 @pytest.mark.skipif(NODE is None or not JS_ENGINE.exists(), reason="needs node and web/engine/flybrain.js")
-@pytest.mark.parametrize("activation", ["relu", "gelu", "tanh"])
+@pytest.mark.parametrize("activation", ["relu", "gelu", "tanh", "satrelu"])
 def test_js_engine_matches_numpy_forward(graph, tmp_path, activation):
     """web/engine/flybrain.js == numpy_forward on the exported blob (policy and value), every activation."""
     torch.manual_seed(1)

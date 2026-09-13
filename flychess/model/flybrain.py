@@ -43,10 +43,31 @@ def _gelu_tanh(t: Tensor) -> Tensor:
     return F.gelu(t, approximate="tanh")
 
 
-def activation_fn(name: str):
+class SatReLU(nn.Module):
+    """Saturating rectifier ``sat * tanh(relu(x) / sat)``: non-negative rates with a ceiling of ``sat``.
+
+    Biologically a firing rate saturates; numerically it keeps the recurrent activity bounded, which
+    an unbounded ReLU in an excitatory-loop network does not (activity drifted 65 -> 300 over one epoch).
+    Linear (slope 1) for small inputs, so Dale's-law signs keep their meaning.
+    """
+
+    def __init__(self, sat: float) -> None:
+        super().__init__()
+        self.sat = float(sat)
+
+    def forward(self, t: Tensor) -> Tensor:
+        return self.sat * torch.tanh(F.relu(t) / self.sat)
+
+    def extra_repr(self) -> str:
+        return f"sat={self.sat}"
+
+
+def activation_fn(name: str, sat: float = 10.0):
     """The recurrent non-linearity. GELU uses the tanh approximation so that JS/numpy can match it."""
     if name == "relu":
         return torch.relu
+    if name == "satrelu":
+        return SatReLU(sat)
     if name == "tanh":
         return torch.tanh
     if name == "gelu":
@@ -54,10 +75,12 @@ def activation_fn(name: str):
     raise ValueError(f"unknown activation {name!r}")
 
 
-def activation_module(name: str) -> nn.Module:
+def activation_module(name: str, sat: float = 10.0) -> nn.Module:
     """``nn.Module`` version of :func:`activation_fn` (same math), used inside the value MLP."""
     if name == "relu":
         return nn.ReLU()
+    if name == "satrelu":
+        return SatReLU(sat)
     if name == "tanh":
         return nn.Tanh()
     if name == "gelu":
@@ -97,7 +120,7 @@ class FlyBrain(nn.Module):
         self.n_out = int(graph.n_out)
         self.steps = int(config.steps)
         self.dale = bool(config.dale)
-        self.act = activation_fn(config.activation)
+        self.act = activation_fn(config.activation, config.sat)
         dtype = _DTYPES[config.dtype]
 
         # ---- fixed connectome data (buffers) ----
@@ -135,7 +158,7 @@ class FlyBrain(nn.Module):
         if config.value_hidden > 0:
             self.value_head = nn.Sequential(
                 nn.Linear(self.n_out, config.value_hidden, dtype=dtype),
-                activation_module(config.activation),
+                activation_module(config.activation, config.sat),
                 nn.Linear(config.value_hidden, 1, dtype=dtype),
             )
         else:

@@ -109,8 +109,10 @@ function erfRef(x) {
 
 /** Naive float64 reference of SPEC §4. */
 function reference(header, a, x) {
+  const sat = Number(header.activation_sat ?? 10);
   const n = header.n, act = header.activation === 'tanh' ? Math.tanh : header.activation === 'gelu'
-    ? (v) => 0.5 * v * (1 + erfRef(v / Math.SQRT2)) : (v) => Math.max(0, v);
+    ? (v) => 0.5 * v * (1 + erfRef(v / Math.SQRT2)) : header.activation === 'satrelu'
+    ? (v) => (v > 0 ? sat * Math.tanh(v / sat) : 0) : (v) => Math.max(0, v);
   let h = new Float64Array(n);
   const D = x.length;
   for (let t = 0; t < header.steps; t++) {
@@ -196,7 +198,7 @@ test('loader parses the .flyb layout and dequantises i8', () => {
   assert.deepEqual(Array.from(q2.q), [127, -128, 0, 2]);
 });
 
-for (const activation of ['relu', 'tanh', 'gelu']) {
+for (const activation of ['relu', 'tanh', 'gelu', 'satrelu']) {
   test(`FlyBrain.forward matches the reference implementation (${activation})`, () => {
     const { header, buffer } = buildBlob({ activation, seed: 7, steps: 4 });
     const arrays = parseArrays(header, buffer);

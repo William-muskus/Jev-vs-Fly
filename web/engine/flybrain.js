@@ -24,6 +24,8 @@ const ACTS = {
   tanh: Math.tanh,
   gelu: (v) => 0.5 * v * (1 + erf(v * 0.7071067811865476)),
   gelu_tanh: (v) => 0.5 * v * (1 + Math.tanh(0.7978845608028654 * (v + 0.044715 * v * v * v))),
+  // saturating rectifier: sat * tanh(relu(v) / sat) — non-negative rates with a ceiling (header.activation_sat)
+  satrelu: (sat) => (v) => (v > 0 ? sat * Math.tanh(v / sat) : 0),
 };
 
 export class FlyBrain {
@@ -38,7 +40,7 @@ export class FlyBrain {
     this.activation = header.activation ?? 'relu';
     const pickAct = (name) => {
       const geluTanh = name === 'gelu' && /^tanh$/i.test(String(header.gelu_approximate || ''));
-      const fn = geluTanh ? ACTS.gelu_tanh : ACTS[name];
+      const fn = name === 'satrelu' ? ACTS.satrelu(Number(header.activation_sat ?? 10)) : geluTanh ? ACTS.gelu_tanh : ACTS[name];
       if (!fn) throw new Error(`unknown activation ${name}`);
       return fn;
     };

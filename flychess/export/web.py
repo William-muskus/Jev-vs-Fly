@@ -186,6 +186,7 @@ def export_web(
         "steps": int(cfg.steps),
         "activation": cfg.activation,
         "gelu_approximate": "tanh",
+        "activation_sat": float(cfg.sat),
         "value_head": value_head,
         # non-linearity between value_w and value_w2 (MLP head); the engines must read it from here
         "value_activation": cfg.activation,
@@ -242,9 +243,11 @@ def read_flyb(out_dir: str | Path) -> tuple[dict[str, np.ndarray], dict[str, Any
     return arrays, header
 
 
-def _np_act(name: str):
+def _np_act(name: str, sat: float = 10.0):
     if name == "relu":
         return lambda z: np.maximum(z, 0.0)
+    if name == "satrelu":
+        return lambda z: sat * np.tanh(np.maximum(z, 0.0) / sat)
     if name == "tanh":
         return np.tanh
     if name == "gelu":
@@ -270,7 +273,7 @@ def numpy_forward(arrays: dict[str, np.ndarray], header: dict[str, Any], x1280: 
     bias, alpha = deq("bias"), deq("alpha")
     input_idx = arrays["input_idx"].astype(np.int64)
     output_idx = arrays["output_idx"].astype(np.int64)
-    act = _np_act(header["activation"])
+    act = _np_act(header["activation"], float(header.get("activation_sat", 10.0)))
 
     x = np.asarray(x1280, dtype=np.float32).reshape(-1)
     h_in = deq("w_in") @ x + deq("b_in")                         # (n_in,)
@@ -284,7 +287,7 @@ def numpy_forward(arrays: dict[str, np.ndarray], header: dict[str, Any], x1280: 
     policy = deq("policy_w") @ out + deq("policy_b")
     v = deq("value_w") @ out + deq("value_b")
     if header.get("value_head") == "mlp":
-        v = _np_act(header.get("value_activation", header["activation"]))(v)
+        v = _np_act(header.get("value_activation", header["activation"]), float(header.get("activation_sat", 10.0)))(v)
         v = deq("value_w2") @ v + deq("value_b2")
     value = float(np.tanh(v[0]))
     return policy.astype(np.float32), value, h

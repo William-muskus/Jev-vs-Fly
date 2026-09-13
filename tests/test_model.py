@@ -195,7 +195,7 @@ def test_row_without_legal_moves_raises():
     assert torch.isfinite(masked_policy_log_softmax(logits, torch.ones(3, 16, dtype=torch.uint8))).all()
 
 
-@pytest.mark.parametrize("activation", ["relu", "gelu", "tanh"])
+@pytest.mark.parametrize("activation", ["relu", "gelu", "tanh", "satrelu"])
 def test_model_is_picklable_and_value_head_uses_config_activation(graph, config, activation):
     m = FlyBrain(graph, config.replace(activation=activation))
     m2 = pickle.loads(pickle.dumps(m))  # multiprocessing-spawn workers / torch.save(model) need this
@@ -203,7 +203,8 @@ def test_model_is_picklable_and_value_head_uses_config_activation(graph, config,
     assert torch.allclose(m(x)[0], m2(x)[0]) and torch.allclose(m(x)[1], m2(x)[1])
     # the value MLP's hidden non-linearity is the configured activation (the JS engine uses header.activation)
     inner = m.value_head[1]
-    expected = {"relu": torch.nn.ReLU, "gelu": torch.nn.GELU, "tanh": torch.nn.Tanh}[activation]
+    from flychess.model.flybrain import SatReLU
+    expected = {"relu": torch.nn.ReLU, "gelu": torch.nn.GELU, "tanh": torch.nn.Tanh, "satrelu": SatReLU}[activation]
     assert isinstance(inner, expected)
     z = torch.linspace(-3, 3, 7)
     assert torch.allclose(inner(z), m.act(z))
