@@ -315,20 +315,22 @@ board input and move read-out are new learned projections. `docs/SPEC.md §0` is
 the fly brain is the only thing that picks moves, in Python and in the browser, verified by the
 parity test.
 
-**How strong is it?** Two reference runs, both on the whole brain:
+**How strong is it?** Three reference generations, all on the whole brain:
 
-| run | recipe | held-out top-1 / top-3 | notes |
-|---|---|---|---|
-| `fly1` | 8 timesteps, ReLU, 2014 data (57M positions), 1 epoch | 32.3% / 56.5% | first run; bf16 issue found and fixed mid-way |
-| `fly2` | 16 timesteps, saturating rectifier, 2014+2015 data (108M of 229M positions), fp32 | 31.8% / 55.4% | `configs/v2.yaml`, ~11 h with the fused/reordered kernels |
+| run | recipe | held-out top-1 / top-3 (same 5,120 human positions) |
+|---|---|---|
+| `fly1` | 8 timesteps, ReLU, board via 2,048 sensory/ascending neurons, 2014 data | 34.1% / 58.4% |
+| `fly2` | 16 timesteps, saturating rates, 2014+2015 data, fp32 (`configs/v2.yaml`) | 33.1% / 57.2% |
+| **`fly3`** | fly2 + the board **seen through 5,543 photoreceptors**, homeostatic gains, multi-timestep readout, neuromodulatory gating, central-brain readout, Stockfish-evaluated positions, then gated self-play v2 (`configs/v3.yaml`) | **37.6% / 63.4%** |
 
-On the raw move-prediction metric they are equal; **with search fly2 is far stronger**: `superfly`
-(200 MCTS simulations) vs `superfly` it beat fly1 **12–0**, and it beats the 1-ply material-greedy
-bot 9–1–0. The deeper, bounded network is not a better imitator, it is a better *thinker* — its value
-estimates and its policy on positions outside the human distribution make the tree search work.
-Search budget matters a lot: at 50 simulations fly2 loses 0–12 to fly1 at 200, so the browser tries to
-run as many simulations as the device allows. Without search (`fly`, `larva`) the two are equal: beatable
-by a club player, a real fight for a beginner. Measure your own run with `fly eval --run <name>` (random and 1-ply
+Head-to-head (`superfly`, 100 simulations, 100 games over 50 paired openings): **fly3 vs fly1 +50 =50 −0**,
+**fly3 vs fly2 +100 =0 −0**; fly3's self-play brain beat its own imitation checkpoint 20–0; vs the
+1-ply material-greedy bot it scores +38 =2 −0 with search and +16 =4 −0 without. Deterministic
+engine-vs-engine games are colour-sensitive at this level (White converts, Black holds), so paired
+openings matter and single short matches mislead. Self-play v2 promoted 5 of 9 gated iterations
+(+98, +17, +108, +53, +61 Elo against the previous best). Without search (`fly`, `larva`) it is a
+beatable club-level-ish opponent that plays sensible openings and positional chess and still misses
+tactics; with search it is a real fight. Measure your own run with `fly eval --run <name>` (random and 1-ply
 material opponents ship with the repo; add `--opponent stockfish:1` if a Stockfish binary is on your
 PATH). The dashboard tracks Elo over training. Expect it to beat a random mover comfortably after
 imitation and to lose to any real engine.
