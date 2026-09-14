@@ -66,4 +66,4 @@ selfplay_value_blend: 0.5         # value target = 0.5 * game outcome + 0.5 * ro
 selfplay_gate: true               # promote the candidate only if it beats the best network with superfly
 selfplay_gate_games: 40           # gate match games (paired distinct openings, both colours)
 selfplay_gate_sims: 100           # MCTS simulations per move in the gate match
-selfplay_gate_threshold: 0.55     # promote iff the candidate's score fraction >= threshold
+selfplay_gate_threshold: 0.51      # promote only with a net positive score over the 40-game gate (0.55 rejected coin-flip candidates)
