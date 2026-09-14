@@ -220,6 +220,24 @@ matches within 1e-2 on the 20 highest legal-move logits and the value for every 
 same best move; in practice the difference
 is ~1e-7. The full brain is ~37 MB raw / ~30 MB gzipped.
 
+## Pretrained brains (Hugging Face)
+
+The trained brains live in a separate model repository so this one stays small:
+**https://huggingface.co/cesp99/fly-chess** — `checkpoints/fly1-imitation.pt`, `fly2-imitation.pt`,
+`fly3-imitation.pt`, `fly3-selfplay.pt` (weights only, no optimizer state), `graph/full.npz` (the
+BrainGraph they were trained on) and `web/brain.*` (the browser blob of `fly3-selfplay`, which the
+published website loads directly from Hugging Face). Weights are CC BY-NC 4.0 (derived from the
+FlyWire Codex release).
+
+```bash
+.venv/bin/hf download cesp99/fly-chess --local-dir models      # or: huggingface-cli download …
+fly play --ckpt models/checkpoints/fly3-selfplay.pt --gui        # graph path is stored relative: run from the repo root
+```
+
+Publishing (maintainers): `scripts/publish-hf.py --repo cesp99/fly-chess` after `hf auth login`;
+`MODEL_BASE=https://huggingface.co/cesp99/fly-chess/resolve/main/web/ scripts/deploy-pages.sh` publishes
+the site without the 60 MB blob.
+
 ## Python API
 
 ```python

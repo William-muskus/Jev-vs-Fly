@@ -244,16 +244,30 @@ async function readWithProgress(response, total, onProgress) {
   return out.buffer;
 }
 
-/** Streaming gunzip via DecompressionStream, reporting *compressed* progress against `total`. */
+/** Streaming gunzip via DecompressionStream, reporting *compressed* progress against `total`.
+ *  Sniffs the gzip magic bytes first: a host that already decoded the file (Content-Encoding: gzip on a
+ *  CDN-backed object store) hands us the raw blob, which is returned as-is. */
 async function readGzipWithProgress(response, total, onProgress) {
-  if (typeof DecompressionStream === 'undefined' || !response.body) {
-    throw new Error('DecompressionStream unavailable');
-  }
+  if (!response.body) throw new Error('no response body');
+  const reader = response.body.getReader();
+  const first = await reader.read();
+  if (first.done) throw new Error('empty body');
+  const gz = first.value.byteLength >= 2 && first.value[0] === 0x1f && first.value[1] === 0x8b;
+  if (gz && typeof DecompressionStream === 'undefined') throw new Error('DecompressionStream unavailable');
   let loaded = 0;
+  const upstream = new ReadableStream({
+    start(controller) { controller.enqueue(first.value); },
+    async pull(controller) {
+      const { done, value } = await reader.read();
+      if (done) controller.close(); else controller.enqueue(value);
+    },
+    cancel() { return reader.cancel(); },
+  });
   const counting = new TransformStream({
     transform(chunk, controller) { loaded += chunk.byteLength; onProgress?.(loaded, total); controller.enqueue(chunk); },
   });
-  const stream = response.body.pipeThrough(counting).pipeThrough(new DecompressionStream('gzip'));
+  let stream = upstream.pipeThrough(counting);
+  if (gz) stream = stream.pipeThrough(new DecompressionStream('gzip'));
   const buf = await new Response(stream).arrayBuffer();
   onProgress?.(total || loaded, total || loaded);
   return buf;

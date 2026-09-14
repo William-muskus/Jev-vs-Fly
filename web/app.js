@@ -284,7 +284,10 @@ class App {
       bytes.textContent = m.phase === 'decode' ? 'wiring synapses…' : m.total ? `${(m.loaded / 1e6).toFixed(1)} MB / ${(m.total / 1e6).toFixed(1)} MB` : `${(m.loaded / 1e6).toFixed(1)} MB`;
       if (!tick) tick = requestAnimationFrame(animateCount);
     };
-    const url = new URL('model/', location.href).href;
+    // where the brain lives: <meta name="fly-model-base"> (a relative path such as 'model/' or an absolute
+    // URL, e.g. a Hugging Face 'resolve' folder); the deploy script sets it for the published site
+    const base = document.querySelector('meta[name="fly-model-base"]')?.content?.trim() || 'model/';
+    const url = new URL(base.endsWith('/') ? base : base + '/', location.href).href;
     // a retry always gets a fresh worker: the old one may have died, or be stuck mid-decode
     (retry ? this.brain.restart() : this.brain.load(url)).then((info) => {
       const h = info.header;

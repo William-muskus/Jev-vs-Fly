@@ -4,6 +4,9 @@
 # Usage:  scripts/deploy-pages.sh [remote] [branch]        (defaults: origin gh-pages)
 #         DRY_RUN=1 scripts/deploy-pages.sh                (build the commit, do not push)
 #         KEEP_HISTORY=1 scripts/deploy-pages.sh          (append to gh-pages instead of replacing it)
+#         MODEL_BASE=https://huggingface.co/<user>/<repo>/resolve/main/web/ scripts/deploy-pages.sh
+#                                                          (publish WITHOUT the model: the page loads the brain
+#                                                           from that URL via <meta name="fly-model-base">)
 #
 # Only runs when invoked explicitly. Uses a temporary git worktree so the working tree is untouched.
 # By default every deploy is a single orphan snapshot commit that *replaces* the branch (force
@@ -26,8 +29,9 @@ cd "$ROOT"
 
 # ---- preconditions -------------------------------------------------------------------------
 [[ -f "$WEB/index.html" ]] || { echo "error: $WEB/index.html missing" >&2; exit 1; }
-if [[ ! -f "$WEB/model/brain.json" || ! -f "$WEB/model/brain.flyb" ]]; then
-  echo "error: no exported model in web/model/ — run 'fly export-web --run <name>' first" >&2
+MODEL_BASE="${MODEL_BASE:-}"
+if [[ -z "$MODEL_BASE" && ( ! -f "$WEB/model/brain.json" || ! -f "$WEB/model/brain.flyb" ) ]]; then
+  echo "error: no exported model in web/model/ — run 'fly export-web --run <name>' or set MODEL_BASE=<url>" >&2
   exit 1
 fi
 while IFS= read -r -d '' f; do
@@ -48,6 +52,7 @@ h = json.load(open(sys.argv[1]))
 print(h.get("run_name") or "?", h.get("exported_at") or "?", sep="\t")
 PY
 )
+[[ -n "$MODEL_BASE" ]] && { RUN_NAME="remote"; EXPORTED_AT="$MODEL_BASE"; }
 
 # ---- temporary worktree ---------------------------------------------------------------------
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/flychess-pages.XXXXXX")"
@@ -83,7 +88,14 @@ fi
 # ---- copy site --------------------------------------------------------------------------------
 find "$TMP" -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {} +
 # everything in web/ except node_modules and tests; the model is included on purpose
-tar -C "$WEB" --exclude=node_modules --exclude=test --exclude=.DS_Store -cf - . | tar -C "$TMP" -xf -
+if [[ -n "$MODEL_BASE" ]]; then
+  # the brain is hosted elsewhere (e.g. Hugging Face): ship the site without web/model and point the page at it
+  tar -C "$WEB" --exclude=node_modules --exclude=test --exclude=model --exclude=.DS_Store -cf - . | tar -C "$TMP" -xf -
+  sed -i "s#<meta name=\"fly-model-base\" content=\"[^\"]*\">#<meta name=\"fly-model-base\" content=\"$MODEL_BASE\">#" "$TMP/index.html"
+  grep -q "fly-model-base\" content=\"$MODEL_BASE\"" "$TMP/index.html" || { echo "error: could not set fly-model-base in index.html" >&2; exit 1; }
+else
+  tar -C "$WEB" --exclude=node_modules --exclude=test --exclude=.DS_Store -cf - . | tar -C "$TMP" -xf -
+fi
 touch "$TMP/.nojekyll"          # serve files/dirs starting with _ and keep .gz as-is
 echo "flychess $SRC_COMMIT model=$RUN_NAME exported_at=$EXPORTED_AT" > "$TMP/BUILD.txt"
 
