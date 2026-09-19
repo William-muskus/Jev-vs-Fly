@@ -25,16 +25,27 @@ The 3D hall is vendored from [King's Gambit](https://github.com/alexngdev99/rork
 
 ## Run
 
-```bash
-# required for Jev; never committed — a gitignored `.env` at the repo root also works
-export TYPESAFE_API_KEY=…
-python -m game.server         # API + classic 2D  http://127.0.0.1:8766/
-cd game/medieval && npm install && npm run dev
-# wizard chess 3D → http://127.0.0.1:8080/?autoplay=1
-# or: fly jev-vs-fly --port 8766
+Do **not** `pip install -e .` just to play Jev vs Fly — that pulls PyTorch.
+The hall only needs the small set in `game/requirements.txt`.
+
+```powershell
+# from the repo root, venv already on
+python -m pip install -r game/requirements.txt
+# gitignored; never commit this
+Set-Content -Path .env -Value "TYPESAFE_API_KEY=your_key_here"
+python -m game.server
 ```
 
-Open the 3D page and click **Play wizard chess**, or add `?autoplay=1`.
+Other terminal:
+
+```powershell
+cd C:\Users\Willi\Documents\Dev\Jev-vs-Fly\game\medieval
+npm install
+npm run dev
+```
+
+Wizard chess: http://127.0.0.1:8080/?autoplay=1
+Classic 2D: http://127.0.0.1:8766/
 
 Query flags: `strategy=best_this_turn|best_win_rate|both_turn_then_win|both_win_then_turn`,
 `difficulty=larva|fly|superfly`, `jevColor=white|black`, `maxPlies=80`,
@@ -43,8 +54,6 @@ Query flags: `strategy=best_this_turn|best_win_rate|both_turn_then_win|both_win_
 The first load fetches ~30 MB of fly brain into `game/.model-cache/` (gitignored)
 from [cesp99/fly-chess](https://huggingface.co/cesp99/fly-chess) and serves it
 same-origin so the worker does not trip Hugging Face CORS.
-
-Classic 2D UI remains at `http://127.0.0.1:8766/`.
 
 ## Your Cults STLs (on your computer)
 

@@ -1,0 +1,6 @@
+# Jev vs Fly API only — no PyTorch. The fly brain still runs in the browser.
+chess>=1.11
+fastapi>=0.115
+uvicorn[standard]>=0.30
+requests>=2.32
+typesafe-sdk>=0.7
