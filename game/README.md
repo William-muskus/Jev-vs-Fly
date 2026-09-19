@@ -106,6 +106,6 @@ on the hall reports `Loaded 6/6 local wizard sculpts`. If it says the stone
 army is standing in, the GLBs are not on that machine (the cloud recording
 never has them — they are private-use and not in the repo).
 
-If the horses look at you instead of the far rank, the hall already yaws the
-meshes 180°. Try `?wizardYaw=90` or `?wizardYaw=0` if a different turn is right
-for your export — no need to reconvert.
+Reload the menu with Ctrl+Shift+R after `git pull`. Old King's Gambit
+saves used to restore the Ivory army on the title screen; this fork now
+remembers armies under `jevfly.armies` and defaults both sides to wizard.

@@ -38,7 +38,7 @@ const ATTRACT_DELAY_MS = 30_000;
  */
 const SHOWCASE_VERDICT_DELAY_MS = 2200;
 const RENDER_PREFS_KEY = "kg.render";
-const ARMY_PREFS_KEY = "kg.armies";
+const ARMY_PREFS_KEY = "jevfly.armies";
 const TABLE_PREFS_KEY = "kg.table";
 const PREMOVE_PREFS_KEY = "kg.premove";
 const PREMOVE_DEPTH_KEY = "kg.premovedepth";
