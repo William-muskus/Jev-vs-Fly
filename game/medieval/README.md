@@ -510,11 +510,13 @@ touch target once the padding tightens. Under `400px` of viewport width the grid
 single `16rem` column, the point at which the labels can no longer hold one line each.
 
 **Field tally** (`.mc-tally`, `FieldTally` in `Hud.tsx`). One row per army under the turn slate:
-crest, figures **lost**, time **on the field**, with the battle's total in the header. The row for
-the army on the move is lit — full opacity, a wash and an inset hairline in its own azure/ember — so
-the panel shows whose meter runs without another label, and a fresh burial swells and flares its
-loss count (`mc-tally-toll`). The panel is `pointer-events-none`: it is read, never touched, so taps
-in that corner still reach the board.
+crest, figures **lost**, time **on the field**, with the battle's total in the header. A stacked
+`.mc-tally-clock` bar splits that total between Ivory and Obsidian; each row also fills a
+`.mc-tally-meter` against the longer of the two clocks so the leader sits at 100% and the trailer
+grows as it thinks. The row for the army on the move is lit — full opacity, a wash and an inset
+hairline in its own azure/ember — so the panel shows whose meter runs without another label, and a
+fresh burial swells and flares its loss count (`mc-tally-toll`). The panel is `pointer-events-none`:
+it is read, never touched, so taps in that corner still reach the board.
 
 Elapsed time is **not** the countdown. `ClockState` runs down and only exists when a clock was
 chosen; `ElapsedState` always accumulates, so an untimed duel still reports per-side time.

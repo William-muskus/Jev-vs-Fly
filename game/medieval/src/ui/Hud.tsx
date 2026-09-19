@@ -28,6 +28,7 @@ import {
 
 import type { ElapsedState, Faction, GameSnapshot, LedgerMove, PieceKind } from "../core/types";
 import type { CameraPreset, ShowcaseCamera } from "../scene/sceneEngine";
+import { clockFillPercent, clockShare } from "./clockFill";
 import { Crest, Hourglass, pieceGlyph } from "./Heraldry";
 import { useHasKeyboard } from "./inputMode";
 import { MoveLedger } from "./MoveLedger";
@@ -705,9 +706,9 @@ function FieldTally({ snapshot, getElapsed }: { snapshot: GameSnapshot; getElaps
   return (
     <div
       className="mc-tally mc-slate pointer-events-none"
-      aria-label={`Field tally. ${sideName(snapshot, "w")}: ${losses.w} lost, ${formatElapsed(elapsed.whiteMs)} on the field. ${sideName(snapshot, "b")}: ${
+      aria-label={`Field tally. ${sideName(snapshot, "w")}: ${losses.w} lost, ${formatElapsed(elapsed.whiteMs)} on the clock. ${sideName(snapshot, "b")}: ${
         losses.b
-      } lost, ${formatElapsed(elapsed.blackMs)} on the field.`}
+      } lost, ${formatElapsed(elapsed.blackMs)} on the clock. Total ${formatElapsed(elapsed.totalMs)}.`}
     >
       <div className="mc-tally-head">
         <span>Field tally</span>
@@ -716,11 +717,17 @@ function FieldTally({ snapshot, getElapsed }: { snapshot: GameSnapshot; getElaps
           {formatElapsed(elapsed.totalMs)}
         </span>
       </div>
+      <ClockDuel
+        whiteName={sideName(snapshot, "w")}
+        blackName={sideName(snapshot, "b")}
+        elapsed={elapsed}
+      />
       <TallyRow
         faction="w"
         name={sideName(snapshot, "w")}
         lost={losses.w}
         ms={elapsed.whiteMs}
+        peerMs={elapsed.blackMs}
         onMove={running && snapshot.turn === "w"}
       />
       <TallyRow
@@ -728,8 +735,53 @@ function FieldTally({ snapshot, getElapsed }: { snapshot: GameSnapshot; getElaps
         name={sideName(snapshot, "b")}
         lost={losses.b}
         ms={elapsed.blackMs}
+        peerMs={elapsed.whiteMs}
         onMove={running && snapshot.turn === "b"}
       />
+    </div>
+  );
+}
+
+/**
+ * Stacked share of the battle clock: Ivory (Jev) from the left, Obsidian (Fly)
+ * from the right of that. There is no time control to drain, so the bar is the
+ * split of total thinking time, not a countdown.
+ */
+function ClockDuel({
+  whiteName,
+  blackName,
+  elapsed,
+}: {
+  whiteName: string;
+  blackName: string;
+  elapsed: ElapsedState;
+}) {
+  const white = clockShare(elapsed.whiteMs, elapsed.totalMs);
+  const black = clockShare(elapsed.blackMs, elapsed.totalMs);
+  return (
+    <div
+      className="mc-tally-clock"
+      role="group"
+      aria-label={`${whiteName} ${formatElapsed(elapsed.whiteMs)}, ${blackName} ${formatElapsed(elapsed.blackMs)}`}
+    >
+      {elapsed.totalMs <= 0 ? (
+        <span className="mc-tally-clock-empty" />
+      ) : (
+        <>
+          <span
+            className="mc-tally-clock-seg"
+            data-faction="w"
+            style={{ flexGrow: white }}
+            title={`${whiteName} ${formatElapsed(elapsed.whiteMs)}`}
+          />
+          <span
+            className="mc-tally-clock-seg"
+            data-faction="b"
+            style={{ flexGrow: black }}
+            title={`${blackName} ${formatElapsed(elapsed.blackMs)}`}
+          />
+        </>
+      )}
     </div>
   );
 }
@@ -739,14 +791,17 @@ function TallyRow({
   name,
   lost,
   ms,
+  peerMs,
   onMove,
 }: {
   faction: Faction;
   name: string;
   lost: number;
   ms: number;
+  peerMs: number;
   onMove: boolean;
 }) {
+  const fill = clockFillPercent(ms, peerMs);
   return (
     <div className="mc-tally-row" data-faction={faction} data-live={onMove || undefined}>
       <Crest faction={faction} size={12} active={onMove} />
@@ -757,6 +812,17 @@ function TallyRow({
         {lost}
       </span>
       <span className="mc-tally-time">{formatElapsed(ms)}</span>
+      <div
+        className="mc-tally-meter"
+        role="progressbar"
+        aria-label={`${name} clock`}
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-valuenow={Math.round(fill)}
+        aria-valuetext={formatElapsed(ms)}
+      >
+        <span className="mc-tally-meter-fill" style={{ width: `${fill}%` }} />
+      </div>
     </div>
   );
 }

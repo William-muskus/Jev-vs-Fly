@@ -18,7 +18,7 @@ import { factionRingTexture, radialTexture } from "./textures";
 import { Ease, type TweenManager } from "./tween";
 import { armSculptWarmJobs, attachWeapons, type AttachedArms } from "./weapons";
 import { buildWizardChessPiece } from "./wizardPieces";
-import { wizardGlbKinds, wizardStandEuler, wizardYawRadians } from "./wizardRoster";
+import { wizardGlbKinds, wizardNudge, wizardStandEuler, wizardYawRadians } from "./wizardRoster";
 
 /**
  * Rendered height (world units, 1 unit = 1 board square) per piece kind.
@@ -1960,9 +1960,10 @@ export class PieceFactory {
       if (kinds.has(kind)) {
         try {
           const gltf = await loadGltf(this.loader, `/models/wizard/${kind}.glb`, 1);
-          // Cults prints are Z-up (print bed). Tip the tall axis onto +Y so the
-          // figure stands perpendicular to the hall's XZ board, then optional yaw.
-          // Facing (white −Z / black +Z) is applied later in create().
+          // Cults prints are Z-up. Tip the inner scene, then measure a wrapper
+          // whose local box includes that rotation — measureModel() strips the
+          // root's own quaternion, so sitting the rotated scene itself left a
+          // Y (up) and Z (along the file) shift. Facing is applied in create().
           const size = new THREE.Vector3();
           measureModel(gltf.scene).getSize(size);
           const stand = wizardStandEuler({ x: size.x, y: size.y, z: size.z });
@@ -1970,7 +1971,14 @@ export class PieceFactory {
           if (stand.z) gltf.scene.rotateZ(stand.z);
           const yaw = wizardYawRadians();
           if (yaw) gltf.scene.rotateY(yaw);
-          return this.normalize(gltf.scene, kind, {}, false, skin.arsenal);
+          const root = new THREE.Group();
+          root.name = `wizard_${kind}`;
+          root.add(gltf.scene);
+          const template = this.normalize(root, kind, {}, false, skin.arsenal);
+          const nudge = wizardNudge();
+          template.offset.y += nudge.y;
+          template.offset.z += nudge.z;
+          return template;
         } catch (error) {
           console.warn(`[pieces] wizard GLB for ${kind} failed, using stone`, error);
         }

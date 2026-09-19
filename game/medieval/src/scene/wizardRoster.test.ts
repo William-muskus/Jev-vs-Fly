@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { isGlbMagic, wizardStandEuler, wizardYawRadians } from "./wizardRoster";
+import { isGlbMagic, wizardNudge, wizardStandEuler, wizardYawRadians } from "./wizardRoster";
 
 describe("isGlbMagic", () => {
   it("accepts a glTF-binary header", () => {
@@ -51,5 +51,16 @@ describe("wizardStandEuler", () => {
     const e = wizardStandEuler({ x: 12, y: 2, z: 3 }, "");
     expect(e.x).toBe(0);
     expect(e.z).toBeCloseTo(Math.PI / 2);
+  });
+});
+
+describe("wizardNudge", () => {
+  it("defaults to no extra sit", () => {
+    expect(wizardNudge("")).toEqual({ y: 0, z: 0 });
+    expect(wizardNudge("?autoplay=1")).toEqual({ y: 0, z: 0 });
+  });
+
+  it("reads lift (Y) and push (Z) in board squares", () => {
+    expect(wizardNudge("?wizardLift=0.15&wizardPush=-0.2")).toEqual({ y: 0.15, z: -0.2 });
   });
 });

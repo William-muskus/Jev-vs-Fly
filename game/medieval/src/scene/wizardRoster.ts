@@ -76,6 +76,25 @@ export function wizardStandEuler(
 }
 
 /**
+ * Extra sit after the Z-up tip, in board squares. The tip rotates around the
+ * GLB origin, so uncentered prints pick up a Y (up) and Z (along the file) shift
+ * until we re-measure. These flags nudge that sit without reconverting.
+ * `?wizardLift=0.1` raises; `?wizardPush=-0.2` slides toward White's back rank.
+ */
+export function wizardNudge(search = typeof window !== "undefined" ? window.location.search : ""): {
+  y: number;
+  z: number;
+} {
+  const params = new URLSearchParams(search);
+  const y = Number(params.get("wizardLift") ?? "0");
+  const z = Number(params.get("wizardPush") ?? "0");
+  return {
+    y: Number.isFinite(y) ? y : 0,
+    z: Number.isFinite(z) ? z : 0,
+  };
+}
+
+/**
  * Which converted wizard GLBs are actually being served.
  *
  * The tracked `manifest.json` used to list `kinds: []`, and `git pull` would

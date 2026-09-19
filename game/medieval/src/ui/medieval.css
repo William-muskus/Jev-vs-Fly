@@ -511,7 +511,7 @@
 
 .mc-tally {
   --mc-tally-accent: rgba(216, 177, 99, 0.28);
-  width: 11.2rem;
+  width: 12.4rem;
   padding: 0.34rem 0.5rem 0.4rem;
   border-radius: 3px;
   animation: mc-fade 420ms ease both;
@@ -540,11 +540,40 @@
   font-variant-numeric: tabular-nums;
 }
 
+/* Split of total thinking time: azure (Ivory / Jev) then ember (Obsidian / Fly). */
+.mc-tally-clock {
+  display: flex;
+  height: 0.4rem;
+  margin: 0.34rem 0 0.16rem;
+  border-radius: 2px;
+  overflow: hidden;
+  background: rgba(12, 8, 4, 0.55);
+  box-shadow: inset 0 0 0 1px rgba(138, 101, 34, 0.3);
+}
+
+.mc-tally-clock-empty {
+  flex: 1;
+}
+
+.mc-tally-clock-seg {
+  min-width: 0;
+  transition: flex-grow 420ms ease;
+}
+
+.mc-tally-clock-seg[data-faction="w"] {
+  background: linear-gradient(90deg, #2f6dc4 0%, #7eb4ff 100%);
+}
+
+.mc-tally-clock-seg[data-faction="b"] {
+  background: linear-gradient(90deg, #c44a32 0%, #e8896a 100%);
+}
+
 .mc-tally-row {
   display: grid;
   grid-template-columns: auto 1fr auto auto;
+  grid-template-rows: auto auto;
   align-items: center;
-  gap: 0.34rem;
+  gap: 0.18rem 0.34rem;
   padding: 0.22rem 0.16rem 0.22rem 0;
   opacity: 0.62;
   transition:
@@ -566,10 +595,12 @@
 
 .mc-tally-row[data-faction="w"] {
   --mc-tally-accent: rgba(72, 132, 214, 0.34);
+  --mc-tally-fill: #5a9ae8;
 }
 
 .mc-tally-row[data-faction="b"] {
   --mc-tally-accent: rgba(200, 74, 44, 0.34);
+  --mc-tally-fill: #d45a42;
 }
 
 .mc-tally-name {
@@ -605,6 +636,28 @@
   font-variant-numeric: tabular-nums;
 }
 
+.mc-tally-meter {
+  grid-column: 1 / -1;
+  height: 0.28rem;
+  border-radius: 2px;
+  overflow: hidden;
+  background: rgba(12, 8, 4, 0.5);
+  box-shadow: inset 0 0 0 1px rgba(138, 101, 34, 0.22);
+}
+
+.mc-tally-meter-fill {
+  display: block;
+  height: 100%;
+  width: 0;
+  background: var(--mc-tally-fill, #d8b163);
+  box-shadow: 0 0 8px var(--mc-tally-fill, #d8b163);
+  transition: width 420ms ease;
+}
+
+.mc-tally-row[data-live] .mc-tally-meter-fill {
+  filter: brightness(1.18);
+}
+
 /* Rings the bell on a fresh burial: the count swells and flares ember once. */
 @keyframes mc-tally-toll {
   0% {
@@ -623,7 +676,7 @@
 
 @media (max-width: 600px) {
   .mc-tally {
-    width: 10.2rem;
+    width: 11.2rem;
     padding: 0.28rem 0.42rem 0.32rem;
   }
 
@@ -637,6 +690,11 @@
   .mc-tally,
   .mc-tally-lost {
     animation: none;
+  }
+
+  .mc-tally-clock-seg,
+  .mc-tally-meter-fill {
+    transition: none;
   }
 }
 

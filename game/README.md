@@ -57,7 +57,12 @@ Query flags: `strategy=best_this_turn|best_win_rate|both_turn_then_win|both_win_
 without a tip they lie **parallel** to the board. The hall now rotates the
 tallest axis onto +Y so they stand **perpendicular**. Facing is `wizardYaw=0`
 (the default — you do not need the query flag). If a mesh still lies flat,
-`?wizardUp=z` forces that tip; `?wizardUp=none` skips it. `speed` scales think
+`?wizardUp=z` forces that tip; `?wizardUp=none` skips it. The hall then sits
+feet on the tile and centres the sculpt (the tip alone used to leave a Y/Z
+shift). Fine-tune with `?wizardLift=0.1` (up) and `?wizardPush=-0.2` (along
+the file). The field tally under the turn slate now draws a stacked Jev|Fly
+clock bar plus a filling meter per army (elapsed wall time, not a countdown).
+`speed` scales think
 time *and* smash beats (try `speed=4` so a full game is watchable).
 `cinematics=0` skips the long capture camera work.
 
