@@ -41,6 +41,12 @@ interface ActiveTween {
 
 export class TweenManager {
   private tweens: ActiveTween[] = [];
+  /** Multiplier applied to every tick — 2 plays the choreography twice as fast. */
+  private timeScale = 1;
+
+  setTimeScale(scale: number): void {
+    this.timeScale = Math.max(0.05, scale);
+  }
 
   to(options: {
     duration: number;
@@ -63,6 +69,7 @@ export class TweenManager {
 
   update(delta: number): void {
     if (this.tweens.length === 0) return;
+    const step = delta * this.timeScale;
     const finished: ActiveTween[] = [];
     for (const tween of this.tweens) {
       if (tween.cancelled) {
@@ -70,10 +77,10 @@ export class TweenManager {
         continue;
       }
       if (tween.delay > 0) {
-        tween.delay -= delta;
+        tween.delay -= step;
         continue;
       }
-      tween.elapsed += delta;
+      tween.elapsed += step;
       const t = Math.min(1, tween.elapsed / tween.duration);
       tween.onUpdate(tween.easing(t));
       if (t >= 1) finished.push(tween);

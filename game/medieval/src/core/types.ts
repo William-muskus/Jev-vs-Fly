@@ -19,7 +19,7 @@ export interface DemoOptions {
   white: Difficulty;
   /** Engine strength for the obsidian army. */
   black: Difficulty;
-  /** Pacing multiplier for the pause between moves (1 = normal, 2 = twice as fast). */
+  /** Pacing multiplier for think floor, smash waits, and board tweens (1 = normal, 2 = twice as fast). */
   speed: number;
   /** Start a fresh game a few seconds after the last one ends. */
   autoRematch: boolean;

@@ -7,6 +7,9 @@ never leaves this process.
 
 from __future__ import annotations
 
+import argparse
+import os
+import sys
 import threading
 from collections.abc import Callable, Mapping
 from pathlib import Path
@@ -166,12 +169,81 @@ def create_app(
 
 app = create_app()
 
+DEFAULT_HOST = "127.0.0.1"
+DEFAULT_PORT = 8766
 
-def serve(host: str = "127.0.0.1", port: int = 8766) -> None:
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Jev vs Fly API and classic 2D board")
+    parser.add_argument("--host", default=os.environ.get("JEV_FLY_HOST", DEFAULT_HOST))
+    parser.add_argument("--port", type=int, default=int(os.environ.get("JEV_FLY_PORT", str(DEFAULT_PORT))))
+    return parser.parse_args(argv)
+
+
+def probe_health(host: str, port: int) -> dict[str, Any] | None:
+    import json
+    import urllib.error
+    import urllib.request
+
+    url = f"http://{host}:{port}/health"
+    try:
+        with urllib.request.urlopen(url, timeout=1.0) as resp:
+            body = json.loads(resp.read().decode("utf-8"))
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError, ValueError):
+        return None
+    return body if isinstance(body, dict) else None
+
+
+def port_held(host: str, port: int) -> bool:
+    import socket
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.settimeout(0.4)
+        return sock.connect_ex((host, port)) == 0
+
+
+def occupy_message(host: str, port: int, health: Mapping[str, Any] | None) -> str:
+    kill = (
+        f"  Get-NetTCPConnection -LocalPort {port} -ErrorAction SilentlyContinue "
+        "| Select-Object OwningProcess, State\n"
+        "  Stop-Process -Id <OwningProcess> -Force"
+    )
+    if health and health.get("ok"):
+        return (
+            f"Jev vs Fly is already running at http://{host}:{port}/\n"
+            "Leave that window open. In a second terminal start the 3D hall:\n"
+            "  cd game\\medieval\n"
+            "  npm install\n"
+            "  npm run dev\n"
+            "Then open http://127.0.0.1:8080/?autoplay=1\n"
+            "To restart the API, stop the old process first:\n"
+            f"{kill}"
+        )
+    return (
+        f"Port {port} on {host} is already in use (Windows error 10048).\n"
+        "A previous python -m game.server is the usual cause. PowerShell:\n"
+        f"{kill}\n"
+        "If nothing is listed, Windows may have reserved the port (Hyper-V / WinNAT):\n"
+        "  netsh interface ipv4 show excludedportrange protocol=tcp\n"
+        f"Then pick a free port: python -m game.server --port {port + 1}\n"
+        "(The 3D hall proxy in game/medieval/vite.config.ts still points at 8766.)"
+    )
+
+
+def serve(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT) -> None:
+    health = probe_health(host, port)
+    if health is not None or port_held(host, port):
+        print(occupy_message(host, port, health), file=sys.stderr)
+        raise SystemExit(1)
     import uvicorn
 
     uvicorn.run(app, host=host, port=int(port), log_level="info")
 
 
+def main(argv: list[str] | None = None) -> None:
+    args = parse_args(argv)
+    serve(host=args.host, port=args.port)
+
+
 if __name__ == "__main__":
-    serve()
+    main()

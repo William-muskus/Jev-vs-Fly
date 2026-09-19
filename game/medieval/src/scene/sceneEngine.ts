@@ -1015,6 +1015,8 @@ export class SceneEngine {
   /** Travels with the camera so the near face of every figure stays readable. */
   private cameraLamp: THREE.DirectionalLight;
   private captureCinematics = true;
+  /** Showcase speed: smash waits and board tweens share this clock. */
+  private playbackRate = 1;
   /**
    * Hotseat: whether a played turn swings the view round to the other side. Off
    * unless the player asks for it — a half turn of the hall between every ply is
@@ -1720,7 +1722,7 @@ export class SceneEngine {
         this.factory.ensureClip(attacker.color, attacker.kind, "attack"),
         this.factory.ensureClip(victim.color, victim.kind, "death"),
       ]),
-      wait(2.4),
+      this.beat(2.4),
     ]);
   }
 
@@ -1735,7 +1737,7 @@ export class SceneEngine {
    */
   private async armStride(piece: PieceView, name: MarchClip): Promise<boolean> {
     if (piece.hasClip(name)) return true;
-    await Promise.race([this.factory.ensureClip(piece.color, piece.kind, name), wait(0.6)]);
+    await Promise.race([this.factory.ensureClip(piece.color, piece.kind, name), this.beat(0.6)]);
     return piece.hasClip(name);
   }
 
@@ -1976,7 +1978,7 @@ export class SceneEngine {
     // short delay so they land with the ring closing, not with the footfall.
     const chips = Math.max(4, Math.round(settings.captureParticles * (0.16 + weight * 0.16)));
     void (async () => {
-      await wait(0.26);
+      await this.beat(0.26);
       if (this.disposed) return;
       this.effects.spawnBurst(centre.clone().setY(BOARD_TOP + 0.1), accent, chips, {
         speed: 0.9 + weight * 0.7,
@@ -2083,7 +2085,7 @@ export class SceneEngine {
     // target. A held breath here is what makes the blow read as its own action
     // rather than the tail of the walk. The heavier the rank, the longer it
     // stands there before it commits.
-    await wait(profile.wind);
+    await this.beat(profile.wind);
 
     // Sentence before execution: the crown drops a column of light on the
     // condemned and the hall is told what is coming.
@@ -2104,7 +2106,7 @@ export class SceneEngine {
         delay: lead,
       });
     }
-    if (strike && strike.duration > 0) await wait(strike.impact);
+    if (strike && strike.duration > 0) await this.beat(strike.impact);
     else await this.lunge(attacker, direction, profile.heft);
 
     const impact = victimSpot.clone().setY(0.55);
@@ -2168,7 +2170,7 @@ export class SceneEngine {
 
     // Hitstop: on a heavy blow the whole beat holds for a frame or two on
     // contact, which is what makes the hit feel like it connected with mass.
-    if (profile.hold > 0) await wait(profile.hold);
+    if (profile.hold > 0) await this.beat(profile.hold);
 
     if (!strike || strike.duration === 0) this.recover(attacker, direction, profile.heft);
 
@@ -2177,7 +2179,7 @@ export class SceneEngine {
 
     // The defender goes down while the attacker finishes following through.
     const recovery = strike ? Math.min(0.45, Math.max(0, strike.duration - strike.impact)) : 0.18;
-    await Promise.all([this.slay(victim, blow), wait(recovery)]);
+    await Promise.all([this.slay(victim, blow), this.beat(recovery)]);
 
     void this.tweens.to({
       duration: 0.45,
@@ -2231,7 +2233,7 @@ export class SceneEngine {
       rise: 0.7,
     });
     victim.flareAura(0.8);
-    await wait(0.36);
+    await this.beat(0.36);
   }
 
   /**
@@ -2239,7 +2241,7 @@ export class SceneEngine {
    * tiles and a low cloud of grit rolling off the square.
    */
   private async aftershock(square: SquareId, strength: number): Promise<void> {
-    await wait(0.18);
+    await this.beat(0.18);
     const settings = QUALITY_SETTINGS[this.preset];
     this.shake.add(strength);
     this.board.impact(square, 0xffa457, strength * 0.7);
@@ -2315,7 +2317,7 @@ export class SceneEngine {
       for (let i = 0; i < spell.bolts - 1; i += 1) {
         leaders.push(this.throwFireball(attacker, impact, { size: 0.34, delay: i * 0.11, leader: true }));
       }
-      await wait(0.18);
+      await this.beat(0.18);
       await this.throwFireball(attacker, impact, { size: 0.64 });
       await Promise.all(leaders);
     } else {
@@ -2414,7 +2416,7 @@ export class SceneEngine {
           delay: drop * 0.82,
           jitter: -0.3,
         });
-        await wait(drop);
+        await this.beat(drop);
       }
     }
 
@@ -2430,7 +2432,7 @@ export class SceneEngine {
         onUpdate: (t) => attacker.setStrikeTilt(-0.1 * t),
       });
     }
-    await wait(gun.aim);
+    await this.beat(gun.aim);
 
     // ---- the drill -----------------------------------------------------
     // A standing gunner plays his firing clip at its own readable length (see
@@ -2473,13 +2475,13 @@ export class SceneEngine {
     // frame alongside the muzzle flash. That is what makes the shot audibly
     // belong to the finger that pulled it rather than merely happening near it.
     const lock = Math.min(gun.lock, untilShot * 0.5);
-    await wait(untilShot - lock);
+    await this.beat(untilShot - lock);
     audio.triggerPull({
       pan: this.stereoPan(attacker.muzzleOrigin()),
       weight: gun.calibre,
       volume: 0.8 + gun.calibre * 0.4,
     });
-    await wait(lock);
+    await this.beat(lock);
 
     // ---- the shot ------------------------------------------------------
     const muzzle = attacker.muzzleOrigin();
@@ -2697,7 +2699,7 @@ export class SceneEngine {
       });
     }
 
-    if (gun.hold > 0) await wait(gun.hold);
+    if (gun.hold > 0) await this.beat(gun.hold);
     if (gun.aftershock > 0) void this.aftershock(strikeSquare, gun.aftershock);
 
     // The sight picture stops sweeping the moment the shot is away: a man who
@@ -2748,11 +2750,11 @@ export class SceneEngine {
     const length = attacker.playRise(0.95);
     if (length <= 0) {
       attacker.playIdle(0.5);
-      await wait(0.4);
+      await this.beat(0.4);
       return;
     }
     audio.footstep({ pan, timbre: "scuff", volume: 0.5, delay: length * 0.55, jitter: -0.2 });
-    await wait(length);
+    await this.beat(length);
     // The clip is clamped on its standing frame, so the stance blends out of a
     // body that is already on its feet.
     attacker.playIdle(0.2);
@@ -2903,7 +2905,7 @@ export class SceneEngine {
 
     // The hall takes the recoil a beat after the shot, not with it.
     void (async () => {
-      await wait(0.06);
+      await this.beat(0.06);
       this.shake.add(0.34);
     })();
   }
@@ -2926,7 +2928,7 @@ export class SceneEngine {
     if (length <= 0) return;
     audio.gunLock({ pan, weight: gun.calibre, volume: 0.42, delay: length * 0.28 });
     audio.gunLock({ pan, weight: gun.calibre * 0.6, volume: 0.32, delay: length * 0.62 });
-    await wait(Math.min(length, 0.95));
+    await this.beat(Math.min(length, 0.95));
     if (!gun.stance.kneel) attacker.playIdle(0.22);
   }
 
@@ -3025,7 +3027,7 @@ export class SceneEngine {
     target: THREE.Vector3,
     options: { size?: number; delay?: number; leader?: boolean } = {},
   ): Promise<void> {
-    if (options.delay && options.delay > 0) await wait(options.delay);
+    if (options.delay && options.delay > 0) await this.beat(options.delay);
     const settings = QUALITY_SETTINGS[this.preset];
     const look = SPELL_LOOK[attacker.color];
     const start = attacker.castOrigin();
@@ -3274,7 +3276,7 @@ export class SceneEngine {
       },
     });
 
-    await wait(death);
+    await this.beat(death);
     // Dust kicked up as the body lands, then a beat to let the fall register.
     this.effects.spawnBurst(victim.container.position.clone().setY(0.16), 0x9c8a6a, 24, {
       speed: 1.3,
@@ -3291,7 +3293,7 @@ export class SceneEngine {
       color: 0x8f8172,
       opacity: 0.5,
     });
-    await wait(0.14);
+    await this.beat(0.14);
   }
 
   /**
@@ -3571,7 +3573,7 @@ export class SceneEngine {
       },
     });
     this.effects.spawnBurst(start.clone().setY(0.12), 0x9c8a6a, 22, { speed: 1.4, life: 0.7 });
-    await wait(0.2);
+    await this.beat(0.2);
     victim.container.quaternion.copy(rest);
     victim.container.position.copy(start);
   }
@@ -4773,7 +4775,7 @@ export class SceneEngine {
     }
     this.board.setHighlight(from, "capture", true);
     this.board.setHighlight(to, "capture", true);
-    await wait(0.55);
+    await this.beat(0.55);
     if (this.disposed) return;
     this.restoreBaseHighlights();
   }
@@ -5043,7 +5045,7 @@ export class SceneEngine {
 
         // A figure caught mid-march would be holding a sculpt that is about to
         // be freed, so the fight on screen finishes first.
-        while (this.movesInFlight > 0 && !this.disposed) await wait(0.1);
+        while (this.movesInFlight > 0 && !this.disposed) await this.beat(0.1);
         if (this.disposed) return;
 
         // Stale first, so the rebuild only tears the old army down.
@@ -5078,6 +5080,20 @@ export class SceneEngine {
 
   setCaptureCinematics(enabled: boolean): void {
     this.captureCinematics = enabled;
+  }
+
+  /**
+   * Speeds up smash waits and board tweens. 1 is the authored tempo; 4 is the
+   * recording pace that still reads as a duel instead of a slide show.
+   */
+  setPlaybackRate(rate: number): void {
+    this.playbackRate = Math.max(0.25, Math.min(8, rate));
+    this.tweens.setTimeScale(this.playbackRate);
+  }
+
+  /** Holds for authored seconds, shortened by {@link setPlaybackRate}. */
+  private beat(seconds: number): Promise<void> {
+    return wait(seconds / this.playbackRate);
   }
 
   setRotateBoard(enabled: boolean): void {

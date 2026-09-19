@@ -427,6 +427,7 @@ export function GameShell() {
       engine?.setInteractive(true);
       // A showcase brings its own framing (and its own crisp grade) with it.
       engine?.setShowcase(showcase, showcaseCamera);
+      engine?.setPlaybackRate(showcase ? (config.demo?.speed ?? 1) : 1);
       if (!showcase) {
         engine?.setCameraPreset(config.mode === "ai" && config.playerColor === "b" ? "black" : "white");
       }
@@ -453,6 +454,7 @@ export function GameShell() {
     const speed = Number(params.get("speed") || "1") || 1;
     const maxPliesRaw = Number(params.get("maxPlies") || "80");
     const maxPlies = Number.isFinite(maxPliesRaw) && maxPliesRaw > 0 ? maxPliesRaw : 80;
+    const cinematics = params.get("cinematics") !== "0";
     flyClient.difficulty = flyDiff;
     try {
       await flyClient.load("/model/");
@@ -495,14 +497,15 @@ export function GameShell() {
       ...current,
       arena: "dusk",
       skins: wizardSkins,
-      captureCinematics: true,
+      captureCinematics: cinematics,
     }));
     const engine = engineRef.current;
     engine?.setAttract(false);
     engine?.setInteractive(false);
     engine?.setArena("dusk");
     engine?.setArmySkins(wizardSkins);
-    engine?.setCaptureCinematics(true);
+    engine?.setCaptureCinematics(cinematics);
+    engine?.setPlaybackRate(speed);
     engine?.setShowcase(true, showcaseCamera);
     controller.start({
       mode: "demo",
@@ -534,6 +537,7 @@ export function GameShell() {
     engine?.setTacticalView(false);
     engine?.setInteractive(false);
     engine?.setShowcase(false);
+    engine?.setPlaybackRate(1);
     engine?.setCameraPreset("cinematic");
     setCinema(false);
     setPhase("menu");
@@ -549,6 +553,7 @@ export function GameShell() {
     (speed: number) => {
       audio.blip("press");
       controller.setDemoSpeed(speed);
+      engineRef.current?.setPlaybackRate(speed);
     },
     [controller],
   );
@@ -700,9 +705,10 @@ export function GameShell() {
       setVerdictReady(false);
       return;
     }
-    const timer = setTimeout(() => setVerdictReady(true), SHOWCASE_VERDICT_DELAY_MS);
+    const delay = SHOWCASE_VERDICT_DELAY_MS / Math.max(0.25, snapshot.demo?.speed ?? 1);
+    const timer = setTimeout(() => setVerdictReady(true), delay);
     return () => clearTimeout(timer);
-  }, [showcaseFinished]);
+  }, [showcaseFinished, snapshot.demo?.speed]);
 
   return (
     <div

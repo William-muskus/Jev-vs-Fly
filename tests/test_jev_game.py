@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import pytest
 from fastapi.testclient import TestClient
 
-from game.server import create_app
+from game.server import create_app, occupy_message, parse_args
 from tests.test_jev_experiments import Scripted
 
 
@@ -70,3 +71,32 @@ def test_wizard_manifest_is_served():
     r = c.get("/models/wizard/manifest.json")
     assert r.status_code == 200, r.text
     assert "kinds" in r.json()
+
+
+def test_parse_serve_args(monkeypatch):
+    monkeypatch.delenv("JEV_FLY_PORT", raising=False)
+    monkeypatch.delenv("JEV_FLY_HOST", raising=False)
+    args = parse_args(["--port", "9001", "--host", "0.0.0.0"])
+    assert args.port == 9001 and args.host == "0.0.0.0"
+    assert parse_args([]).port == 8766
+
+
+def test_occupy_message_already_running():
+    msg = occupy_message("127.0.0.1", 8766, {"ok": True})
+    assert "already running" in msg
+    assert "npm run dev" in msg
+    busy = occupy_message("127.0.0.1", 8766, None)
+    assert "10048" in busy
+    assert "Get-NetTCPConnection" in busy
+
+
+def test_serve_exits_when_the_port_is_taken(monkeypatch, capsys):
+    from game import server
+
+    monkeypatch.setattr(server, "probe_health", lambda host, port: {"ok": True})
+    monkeypatch.setattr(server, "port_held", lambda host, port: True)
+    with pytest.raises(SystemExit) as caught:
+        server.serve(host="127.0.0.1", port=8766)
+    assert caught.value.code == 1
+    err = capsys.readouterr().err
+    assert "already running" in err

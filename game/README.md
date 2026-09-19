@@ -49,7 +49,26 @@ Classic 2D: http://127.0.0.1:8766/
 
 Query flags: `strategy=best_this_turn|best_win_rate|both_turn_then_win|both_win_then_turn`,
 `difficulty=larva|fly|superfly`, `jevColor=white|black`, `maxPlies=80`,
-`speed=1`, `cinema=1`.
+`speed=1`, `cinema=1`, `cinematics=1`. `speed` scales think time *and* smash
+beats (try `speed=4` so a full game is watchable). `cinematics=0` skips the
+long capture camera work.
+
+If `python -m game.server` dies with **WinError 10048** / *une seule utilisation
+de chaque adresse de socket*, port **8766 is already taken**. Usually the API
+from the first successful start is still running — leave it, and in a second
+terminal start the hall (`cd game\medieval` then `npm run dev`). To free the
+port:
+
+```powershell
+Get-NetTCPConnection -LocalPort 8766 -ErrorAction SilentlyContinue |
+  Select-Object OwningProcess, State
+Stop-Process -Id <OwningProcess> -Force
+python -m game.server
+```
+
+Or bind somewhere else: `python -m game.server --port 8767` (the Vite proxy in
+`game/medieval/vite.config.ts` still talks to 8766, so prefer killing the old
+process).
 
 The first load fetches ~30 MB of fly brain into `game/.model-cache/` (gitignored)
 from [cesp99/fly-chess](https://huggingface.co/cesp99/fly-chess) and serves it
