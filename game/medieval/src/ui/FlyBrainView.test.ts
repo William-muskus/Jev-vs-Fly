@@ -4,6 +4,6 @@ import { FlyBrainView } from "./FlyBrainView";
 
 describe("FlyBrainView", () => {
   it("exports a component Vite can transform", () => {
-    expect(typeof FlyBrainView).toBe("function");
+    expect(FlyBrainView).toBeTruthy();
   });
 });

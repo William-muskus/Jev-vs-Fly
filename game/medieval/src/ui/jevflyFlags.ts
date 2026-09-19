@@ -1,4 +1,6 @@
 import type { Faction } from "../core/types";
+import type { QualityPreset } from "../scene/quality";
+import { QUALITY_ORDER } from "../scene/quality";
 
 /**
  * Query flags for a Jev vs Fly autoplay.
@@ -15,6 +17,14 @@ export type ComputerOpponent = "jev" | "fly";
 
 export function cinemaEnabled(search = typeof window !== "undefined" ? window.location.search : ""): boolean {
   return new URLSearchParams(search).get("cinema") === "1";
+}
+
+/** Optional `?quality=low|medium|high|ultra` override for autoplay and debugging. */
+export function qualityPresetFromSearch(
+  search = typeof window !== "undefined" ? window.location.search : "",
+): QualityPreset | null {
+  const q = new URLSearchParams(search).get("quality");
+  return QUALITY_ORDER.includes(q as QualityPreset) ? (q as QualityPreset) : null;
 }
 
 /** Wall-clock and PGN names for the two AIs. */

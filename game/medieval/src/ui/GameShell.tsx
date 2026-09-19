@@ -21,7 +21,7 @@ import { wizardGlbKinds } from "../scene/wizardRoster";
 import { GameOverModal } from "./GameOverModal";
 import { Hud } from "./Hud";
 import { useHasKeyboard } from "./inputMode";
-import { cinemaEnabled, FLY_PLAYER_NAME, JEV_PLAYER_NAME, jevFlySideNames, vsComputerSideNames } from "./jevflyFlags";
+import { cinemaEnabled, FLY_PLAYER_NAME, JEV_PLAYER_NAME, jevFlySideNames, qualityPresetFromSearch, vsComputerSideNames } from "./jevflyFlags";
 import { MainMenu, type MatchConfig } from "./MainMenu";
 import type { MusterChoice } from "./Muster";
 import { SettingsPanel, type GameSettings } from "./SettingsPanel";
@@ -251,6 +251,7 @@ export function GameShell() {
   const snapshot = useGameSnapshot(controller);
 
   const detected = useMemo<QualityPreset>(() => detectQualityPreset(), []);
+  const initialQuality = useMemo<QualityPreset>(() => qualityPresetFromSearch() ?? detected, [detected]);
   const initialRender = useMemo<RenderPrefs>(() => loadRenderPrefs(), []);
   const initialArmies = useMemo<Record<Faction, ArmySkinId>>(() => {
     const params = new URLSearchParams(window.location.search);
@@ -266,7 +267,7 @@ export function GameShell() {
   /** Whether to print key hints at all — a phone has no `F` to press. */
   const hasKeyboard = useHasKeyboard();
   const [settings, setSettings] = useState<GameSettings>(() => ({
-    quality: detected,
+    quality: initialQuality,
     arena: DEFAULT_ARENA,
     skins: initialArmies,
     captureCinematics: true,
@@ -340,7 +341,7 @@ export function GameShell() {
             setTimeout(() => setNotice(null), 9000);
           },
         },
-        detected,
+        initialQuality,
         DEFAULT_ARENA,
       );
     } catch (error) {
@@ -374,7 +375,7 @@ export function GameShell() {
       engineRef.current = null;
       engine.dispose();
     };
-  }, [controller, detected, initialArmies, initialRender]);
+  }, [controller, initialQuality, initialArmies, initialRender]);
 
   useEffect(() => () => controller.dispose(), [controller]);
 

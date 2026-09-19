@@ -984,6 +984,7 @@ export class SceneEngine {
   private lastFrameTime = 0;
   private elapsed = 0;
   private frameId = 0;
+  private hiddenTimer = 0;
   private running = false;
   private disposed = false;
   private frameErrors = 0;
@@ -1198,7 +1199,9 @@ export class SceneEngine {
     for (const source of SHOT_MODELS) void primeShotModel(source);
     // The rigs and their stances are in; the strikes, deaths and strides come
     // down behind the game so the first move never waits on seventy GLBs.
-    void this.factory.warmClips();
+    // Low graphics leaves idle clips off, so prefetching that magazine is just
+    // RAM and decode work on the same thread that has to keep the hall up.
+    if (QUALITY_SETTINGS[this.preset].idleAnimations) void this.factory.warmClips();
   }
 
   /**
@@ -1223,6 +1226,13 @@ export class SceneEngine {
     this.lastFrameTime = performance.now();
     const loop = (): void => {
       if (!this.running) return;
+      this.frameId = 0;
+      this.hiddenTimer = 0;
+      if (typeof document !== "undefined" && document.hidden) {
+        this.lastFrameTime = performance.now();
+        this.hiddenTimer = window.setTimeout(loop, 250);
+        return;
+      }
       this.frameId = requestAnimationFrame(loop);
       try {
         this.frame();
@@ -5065,7 +5075,7 @@ export class SceneEngine {
         this.rebuildPieces();
         const skins = this.factory.getSkins();
         audio.setArmyCries({ w: ARMY_SKINS[skins.w].cries, b: ARMY_SKINS[skins.b].cries });
-        void this.factory.warmClips();
+        if (QUALITY_SETTINGS[this.preset].idleAnimations) void this.factory.warmClips();
       }
     } finally {
       this.swappingArmies = false;
@@ -5342,6 +5352,8 @@ export class SceneEngine {
     this.disposed = true;
     this.running = false;
     cancelAnimationFrame(this.frameId);
+    if (this.hiddenTimer) clearTimeout(this.hiddenTimer);
+    this.hiddenTimer = 0;
     this.tweens.cancelAll();
     this.controller.setAnimator(null);
     this.controls.removeEventListener("start", this.onManualCamera);

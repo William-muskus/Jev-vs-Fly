@@ -131,7 +131,7 @@ export class FlyClient {
       worker.onmessageerror = () => {
         fail(new Error("fly worker crashed"));
       };
-      worker.postMessage({ type: "load", baseUrl, gpu });
+      worker.postMessage({ type: "load", baseUrl, gpu, silhouetteN: 900, sampleN: 512 });
     });
   }
 

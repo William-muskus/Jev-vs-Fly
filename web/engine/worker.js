@@ -142,8 +142,10 @@ async function handleLoad(msg) {
     } finally { clearTimeout(timer); }
   }
   const n = brain.n;
-  sampleIdx = stratifiedSample(n, Math.min(SAMPLE_N, n), brain.superClass, model.arrays.retina_idx, 0x9e3779b9);
-  const silIdx = spreadSample(n, Math.min(SILHOUETTE_N, n), 0x85ebca6b);
+  const sampleWanted = Number.isFinite(msg.sampleN) ? Math.max(128, Math.min(SAMPLE_N, Math.floor(msg.sampleN))) : SAMPLE_N;
+  sampleIdx = stratifiedSample(n, Math.min(sampleWanted, n), brain.superClass, model.arrays.retina_idx, 0x9e3779b9);
+  const silWanted = Number.isFinite(msg.silhouetteN) ? Math.max(200, Math.min(SILHOUETTE_N, msg.silhouetteN)) : SILHOUETTE_N;
+  const silIdx = spreadSample(n, Math.min(silWanted, n), 0x85ebca6b);
   const legend = readLegend(model.header);
   const F = brain.features;
   self.postMessage({

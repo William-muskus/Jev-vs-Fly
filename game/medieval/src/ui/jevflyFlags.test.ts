@@ -6,6 +6,7 @@ import {
   HUMAN_PLAYER_NAME,
   JEV_PLAYER_NAME,
   jevFlySideNames,
+  qualityPresetFromSearch,
   vsComputerSideNames,
 } from "./jevflyFlags";
 
@@ -22,6 +23,15 @@ describe("cinemaEnabled", () => {
   });
 });
 
+describe("qualityPresetFromSearch", () => {
+  it("reads a graphics preset from the query string", () => {
+    expect(qualityPresetFromSearch("")).toBeNull();
+    expect(qualityPresetFromSearch("?autoplay=1")).toBeNull();
+    expect(qualityPresetFromSearch("?quality=low")).toBe("low");
+    expect(qualityPresetFromSearch("?autoplay=1&quality=low")).toBe("low");
+    expect(qualityPresetFromSearch("?quality=potato")).toBeNull();
+  });
+});
 describe("jevFlySideNames", () => {
   it("labels the wall clock Jev and Fruit Fly", () => {
     expect(jevFlySideNames(true)).toEqual({ w: JEV_PLAYER_NAME, b: FLY_PLAYER_NAME });

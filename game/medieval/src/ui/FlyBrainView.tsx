@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { memo, useEffect, useRef } from "react";
 
 import { BrainCanvas } from "../../../../web/brainviz.js";
 import type { FlyAnatomy, FlyThought } from "../ai/flyAnatomy";
@@ -9,7 +9,7 @@ import { FLY_PLAYER_NAME } from "./jevflyFlags";
  * A thought replays the recurrent timesteps; while Fruit Fly is still searching
  * the dots pulse.
  */
-export function FlyBrainView({
+export const FlyBrainView = memo(function FlyBrainView({
   anatomy,
   thought,
   thinking,
@@ -27,10 +27,7 @@ export function FlyBrainView({
     const viz = new BrainCanvas(canvas);
     vizRef.current = viz;
     return () => {
-      viz.setThinking(false);
-      viz.pause();
-      if (viz.raf) cancelAnimationFrame(viz.raf);
-      viz.raf = 0;
+      viz.dispose();
       vizRef.current = null;
     };
   }, []);
@@ -62,4 +59,4 @@ export function FlyBrainView({
       <canvas ref={canvasRef} className="mc-fly-brain-canvas" />
     </div>
   );
-}
+});

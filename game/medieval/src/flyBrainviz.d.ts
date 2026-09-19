@@ -8,5 +8,10 @@ declare module "../../../../web/brainviz.js" {
     setTrace(trace: ArrayLike<number>, steps: number, opts?: { autoplay?: boolean }): void;
     setThinking(on: boolean): void;
     pause(): void;
+    dispose(): void;
+  }
+  export class ClassStrip {
+    constructor(canvas: HTMLCanvasElement);
+    dispose(): void;
   }
 }

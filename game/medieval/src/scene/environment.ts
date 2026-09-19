@@ -429,6 +429,7 @@ export class CastleHall {
 
   update(delta: number): void {
     this.elapsed += delta;
+    if (this.quality === "low") return;
 
     const torchScale = this.look.torch.intensity;
     for (const torch of this.torches) {
