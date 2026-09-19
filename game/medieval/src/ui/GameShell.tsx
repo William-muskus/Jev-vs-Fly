@@ -861,6 +861,7 @@ export function GameShell() {
                   }
                 : null
             }
+            sideNames={snapshot.sideNames}
             onRematch={handleRematch}
             onMenu={returnToMenu}
           />

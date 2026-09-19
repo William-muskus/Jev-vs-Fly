@@ -30,6 +30,7 @@ interface GameOverModalProps {
   versusComputer: boolean;
   moveCount: number;
   showcase?: ShowcaseOutcome | null;
+  sideNames?: { w: string; b: string };
   onRematch: () => void;
   onMenu: () => void;
 }
@@ -45,12 +46,6 @@ const REASON_COPY: Record<EndReason, string> = {
   draw: "Drawn position",
 };
 
-const ENGINE_NAME: Record<Difficulty, string> = {
-  easy: "Squire",
-  medium: "Knight",
-  hard: "Warlord",
-};
-
 export function GameOverModal({
   result,
   pgn,
@@ -58,26 +53,23 @@ export function GameOverModal({
   versusComputer,
   moveCount,
   showcase,
+  sideNames,
   onRematch,
   onMenu,
 }: GameOverModalProps) {
   const [copied, setCopied] = useState(false);
 
+  const whiteName = (sideNames?.w ?? "Ivory").toUpperCase();
+  const blackName = (sideNames?.b ?? "Obsidian").toUpperCase();
   const draw = result.winner === null;
   const playerWon = versusComputer && result.winner === playerColor;
   const headline = draw
     ? "A DRAW"
-    : showcase
-      ? result.winner === "w"
-        ? "IVORY TRIUMPHS"
-        : "OBSIDIAN TRIUMPHS"
-      : playerWon
-        ? "VICTORY"
-        : versusComputer
-          ? "DEFEAT"
-          : result.winner === "w"
-            ? "IVORY TRIUMPHS"
-            : "OBSIDIAN TRIUMPHS";
+    : result.winner === "w"
+      ? `${whiteName} TRIUMPHS`
+      : `${blackName} TRIUMPHS`;
+  const matchHeadline = playerWon ? "VICTORY" : versusComputer ? "DEFEAT" : headline;
+  const title = versusComputer && !showcase ? matchHeadline : headline;
 
   const copyPgn = async (): Promise<void> => {
     try {
@@ -101,7 +93,7 @@ export function GameOverModal({
         <div className="px-6 pb-6 pt-7 text-center">
           {showcase ? (
             <p className="mc-display text-[0.55rem] tracking-[0.42em] text-[#8a6b3a]">
-              AI VS AI · DUEL {showcase.round}
+              {whiteName} VS {blackName} · DUEL {showcase.round}
             </p>
           ) : null}
 
@@ -116,13 +108,13 @@ export function GameOverModal({
             )}
           </div>
 
-          <h2 className="mc-display mt-4 text-3xl font-bold tracking-[0.14em] text-[#43301a]">{headline}</h2>
+          <h2 className="mc-display mt-4 text-3xl font-bold tracking-[0.14em] text-[#43301a]">{title}</h2>
           <div className="mc-rule mx-auto mt-2 w-40 opacity-70" />
           <p className="mt-2 text-sm italic text-[#6a5334]">{REASON_COPY[result.reason]}</p>
 
           {showcase ? (
             <p className="mc-display mt-2 text-[0.6rem] tracking-[0.24em] text-[#7d6236]">
-              {ENGINE_NAME[showcase.white]} <span className="text-[#a2854c]">vs</span> {ENGINE_NAME[showcase.black]} ·{" "}
+              {whiteName} <span className="text-[#a2854c]">vs</span> {blackName} ·{" "}
               {moveCount} {moveCount === 1 ? "move" : "moves"}
             </p>
           ) : null}
