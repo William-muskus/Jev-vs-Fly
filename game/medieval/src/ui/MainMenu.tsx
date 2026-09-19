@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { Clapperboard, Crown, Swords, Settings as SettingsIcon, Users } from "lucide-react";
 
 import type { FlyDifficulty } from "../ai/flyClient";
@@ -74,17 +74,24 @@ export function MainMenu({ onStart, onJevVsFly, onOpenSettings, muster, onMuster
   const [demoBlack, setDemoBlack] = useState<Difficulty>("hard");
   const [demoSpeed, setDemoSpeed] = useState(1);
   const [demoLoop, setDemoLoop] = useState(true);
+  const opponentRef = useRef(opponent);
+  const flyDifficultyRef = useRef(flyDifficulty);
+  opponentRef.current = opponent;
+  flyDifficultyRef.current = flyDifficulty;
 
-  const start = (): void =>
+  const start = (): void => {
+    const chosen = opponentRef.current;
+    const flyLevel = flyDifficultyRef.current;
     onStart({
       mode: tab,
       difficulty,
       playerColor,
       clockMinutes: tab === "demo" ? null : clock,
       demo: tab === "demo" ? { white: demoWhite, black: demoBlack, speed: demoSpeed, autoRematch: demoLoop } : undefined,
-      opponent: tab === "ai" ? opponent : undefined,
-      flyDifficulty: tab === "ai" && opponent === "fly" ? flyDifficulty : undefined,
+      opponent: tab === "ai" ? chosen : undefined,
+      flyDifficulty: tab === "ai" && chosen === "fly" ? flyLevel : undefined,
     });
+  };
 
   return (
     <div
@@ -160,7 +167,12 @@ export function MainMenu({ onStart, onJevVsFly, onOpenSettings, muster, onMuster
                     type="button"
                     className="mc-chip py-2.5"
                     data-active={opponent === choice}
-                    onClick={() => setOpponent(choice)}
+                    data-opponent={choice}
+                    aria-pressed={opponent === choice}
+                    onClick={() => {
+                      opponentRef.current = choice;
+                      setOpponent(choice);
+                    }}
                   >
                     {choice === "jev" ? JEV_PLAYER_NAME : FLY_PLAYER_NAME}
                   </button>
@@ -179,7 +191,12 @@ export function MainMenu({ onStart, onJevVsFly, onOpenSettings, muster, onMuster
                       type="button"
                       className="mc-chip py-2.5"
                       data-active={flyDifficulty === level}
-                      onClick={() => setFlyDifficulty(level)}
+                      data-fly-brain={level}
+                      aria-pressed={flyDifficulty === level}
+                      onClick={() => {
+                        flyDifficultyRef.current = level;
+                        setFlyDifficulty(level);
+                      }}
                     >
                       {level}
                     </button>
