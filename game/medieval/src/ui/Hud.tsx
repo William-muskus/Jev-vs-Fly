@@ -61,7 +61,7 @@ interface HudProps {
   onToggleCinema: () => void;
   /** Live per-side elapsed time, read on the tally's own tick. */
   getElapsed: () => ElapsedState;
-  /** Fruit Fly connectome sample; omitted unless this is a Jev vs Fly match. */
+  /** Fruit Fly connectome sample; omitted unless the fly is on a banner. */
   flyAnatomy?: FlyAnatomy | null;
   flyThought?: FlyThought | null;
   flyThinking?: boolean;

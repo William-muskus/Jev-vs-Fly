@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest";
 
-import { cinemaEnabled, FLY_PLAYER_NAME, JEV_PLAYER_NAME, jevFlySideNames } from "./jevflyFlags";
+import {
+  cinemaEnabled,
+  FLY_PLAYER_NAME,
+  HUMAN_PLAYER_NAME,
+  JEV_PLAYER_NAME,
+  jevFlySideNames,
+  vsComputerSideNames,
+} from "./jevflyFlags";
 
 describe("cinemaEnabled", () => {
   it("keeps the HUD on default autoplay", () => {
@@ -20,5 +27,14 @@ describe("jevFlySideNames", () => {
     expect(jevFlySideNames(true)).toEqual({ w: JEV_PLAYER_NAME, b: FLY_PLAYER_NAME });
     expect(jevFlySideNames(false)).toEqual({ w: FLY_PLAYER_NAME, b: JEV_PLAYER_NAME });
     expect(FLY_PLAYER_NAME).toBe("Fruit Fly");
+  });
+});
+
+describe("vsComputerSideNames", () => {
+  it("puts You on the chosen banner against Jev or the fly", () => {
+    expect(vsComputerSideNames("jev", "w")).toEqual({ w: HUMAN_PLAYER_NAME, b: JEV_PLAYER_NAME });
+    expect(vsComputerSideNames("jev", "b")).toEqual({ w: JEV_PLAYER_NAME, b: HUMAN_PLAYER_NAME });
+    expect(vsComputerSideNames("fly", "w")).toEqual({ w: HUMAN_PLAYER_NAME, b: FLY_PLAYER_NAME });
+    expect(vsComputerSideNames("fly", "b")).toEqual({ w: FLY_PLAYER_NAME, b: HUMAN_PLAYER_NAME });
   });
 });

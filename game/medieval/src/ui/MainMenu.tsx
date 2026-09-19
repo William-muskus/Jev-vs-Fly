@@ -1,9 +1,11 @@
 import { useState } from "react";
 import { Clapperboard, Crown, Swords, Settings as SettingsIcon, Users } from "lucide-react";
 
+import type { FlyDifficulty } from "../ai/flyClient";
 import type { DemoOptions, Difficulty, Faction } from "../core/types";
 import { Crest } from "./Heraldry";
 import { useHasKeyboard } from "./inputMode";
+import { FLY_PLAYER_NAME, JEV_PLAYER_NAME, type ComputerOpponent } from "./jevflyFlags";
 import { MusterSection, type MusterChoice } from "./Muster";
 
 export interface MatchConfig {
@@ -12,6 +14,10 @@ export interface MatchConfig {
   playerColor: Faction;
   clockMinutes: number | null;
   demo?: DemoOptions;
+  /** Who replies on the Computer tab. Ignored for hotseat / demo. */
+  opponent?: ComputerOpponent;
+  /** FlyWire search size when `opponent === "fly"`. */
+  flyDifficulty?: FlyDifficulty;
 }
 
 interface MainMenuProps {
@@ -29,6 +35,17 @@ const DIFFICULTY_COPY: Record<Difficulty, string> = {
   easy: "Squire — plays fast and loose",
   medium: "Knight — thinks three moves deep",
   hard: "Warlord — full search, no mercy",
+};
+
+const FLY_COPY: Record<FlyDifficulty, string> = {
+  larva: "Larva — the smallest connectome",
+  fly: "Fly — the adult brain",
+  superfly: "Superfly — deepest search",
+};
+
+const OPPONENT_COPY: Record<ComputerOpponent, string> = {
+  jev: "TypeSafe Jev — a decision model over the legal moves.",
+  fly: "The FlyWire connectome — a fruit fly thinking in chess.",
 };
 
 const DEMO_SPEEDS: { label: string; value: number }[] = [
@@ -49,6 +66,8 @@ export function MainMenu({ onStart, onJevVsFly, onOpenSettings, muster, onMuster
   const hasKeyboard = useHasKeyboard();
   const [tab, setTab] = useState<"ai" | "hotseat" | "demo">("ai");
   const [difficulty, setDifficulty] = useState<Difficulty>("medium");
+  const [opponent, setOpponent] = useState<ComputerOpponent>("jev");
+  const [flyDifficulty, setFlyDifficulty] = useState<FlyDifficulty>("fly");
   const [playerColor, setPlayerColor] = useState<Faction>("w");
   const [clock, setClock] = useState<number | null>(null);
   const [demoWhite, setDemoWhite] = useState<Difficulty>("medium");
@@ -63,6 +82,8 @@ export function MainMenu({ onStart, onJevVsFly, onOpenSettings, muster, onMuster
       playerColor,
       clockMinutes: tab === "demo" ? null : clock,
       demo: tab === "demo" ? { white: demoWhite, black: demoBlack, speed: demoSpeed, autoRematch: demoLoop } : undefined,
+      opponent: tab === "ai" ? opponent : undefined,
+      flyDifficulty: tab === "ai" && opponent === "fly" ? flyDifficulty : undefined,
     });
 
   return (
@@ -132,21 +153,41 @@ export function MainMenu({ onStart, onJevVsFly, onOpenSettings, muster, onMuster
           <div className="mc-fade space-y-5">
             <div>
               <p className="mc-display mb-2 text-[0.62rem] tracking-[0.3em] text-[#a89268]">Opponent</p>
-              <div className="grid grid-cols-3 gap-2">
-                {(["easy", "medium", "hard"] as Difficulty[]).map((level) => (
+              <div className="grid grid-cols-2 gap-2">
+                {(["jev", "fly"] as ComputerOpponent[]).map((choice) => (
                   <button
-                    key={level}
+                    key={choice}
                     type="button"
                     className="mc-chip py-2.5"
-                    data-active={difficulty === level}
-                    onClick={() => setDifficulty(level)}
+                    data-active={opponent === choice}
+                    onClick={() => setOpponent(choice)}
                   >
-                    {level}
+                    {choice === "jev" ? JEV_PLAYER_NAME : FLY_PLAYER_NAME}
                   </button>
                 ))}
               </div>
-              <p className="mt-2 text-xs italic text-[#9c8b6c]">{DIFFICULTY_COPY[difficulty]}</p>
+              <p className="mt-2 text-xs italic text-[#9c8b6c]">{OPPONENT_COPY[opponent]}</p>
             </div>
+
+            {opponent === "fly" ? (
+              <div>
+                <p className="mc-display mb-2 text-[0.62rem] tracking-[0.3em] text-[#a89268]">Brain</p>
+                <div className="grid grid-cols-3 gap-2">
+                  {(["larva", "fly", "superfly"] as FlyDifficulty[]).map((level) => (
+                    <button
+                      key={level}
+                      type="button"
+                      className="mc-chip py-2.5"
+                      data-active={flyDifficulty === level}
+                      onClick={() => setFlyDifficulty(level)}
+                    >
+                      {level}
+                    </button>
+                  ))}
+                </div>
+                <p className="mt-2 text-xs italic text-[#9c8b6c]">{FLY_COPY[flyDifficulty]}</p>
+              </div>
+            ) : null}
 
             <div>
               <p className="mc-display mb-2 text-[0.62rem] tracking-[0.3em] text-[#a89268]">Your banner</p>
@@ -296,9 +337,15 @@ export function MainMenu({ onStart, onJevVsFly, onOpenSettings, muster, onMuster
             </>
           )}
         </button>
-        {tab !== "demo" ? (
+        {tab === "ai" ? (
           <p className="mt-2 text-center text-[0.65rem] italic text-[#8a7a5c]">
-            Stock hall engine — not Jev, not the fly. Use Jev vs Fly above.
+            {opponent === "jev"
+              ? "You play. Jev replies. Needs the hall server and a TypeSafe key."
+              : "You play. The fruit fly replies. Needs the hall server and the brain model."}
+          </p>
+        ) : tab === "hotseat" ? (
+          <p className="mt-2 text-center text-[0.65rem] italic text-[#8a7a5c]">
+            Two commanders, one hall. No engine on either banner.
           </p>
         ) : (
           <p className="mt-2 text-center text-[0.65rem] italic text-[#8a7a5c]">

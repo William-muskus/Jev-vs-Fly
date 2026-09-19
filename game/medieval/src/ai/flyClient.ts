@@ -11,7 +11,7 @@ import type { PieceKind, SquareId } from "../core/types";
 
 export type { FlyAnatomy, FlyThought } from "./flyAnatomy";
 
-type FlyDifficulty = "larva" | "fly" | "superfly";
+export type FlyDifficulty = "larva" | "fly" | "superfly";
 
 interface FlyReply {
   type: string;

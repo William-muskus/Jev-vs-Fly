@@ -21,7 +21,7 @@ import { wizardGlbKinds } from "../scene/wizardRoster";
 import { GameOverModal } from "./GameOverModal";
 import { Hud } from "./Hud";
 import { useHasKeyboard } from "./inputMode";
-import { cinemaEnabled, FLY_PLAYER_NAME, JEV_PLAYER_NAME, jevFlySideNames } from "./jevflyFlags";
+import { cinemaEnabled, FLY_PLAYER_NAME, JEV_PLAYER_NAME, jevFlySideNames, vsComputerSideNames } from "./jevflyFlags";
 import { MainMenu, type MatchConfig } from "./MainMenu";
 import type { MusterChoice } from "./Muster";
 import { SettingsPanel, type GameSettings } from "./SettingsPanel";
@@ -98,6 +98,35 @@ function saveSeatSwing(enabled: boolean): void {
   } catch {
     // Private browsing — the choice just will not survive the reload.
   }
+}
+
+function makeJevMover(strategy: string, setNotice: (msg: string | null) => void) {
+  return async (fen: string) => {
+    try {
+      const move = await jevBestMove(fen, strategy);
+      if (!move) throw new Error("Jev returned no move");
+      setNotice(null);
+      return move;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      setNotice(`Jev could not move: ${message}`);
+      throw err;
+    }
+  };
+}
+
+function makeFlyMover(setNotice: (msg: string | null) => void) {
+  return async (fen: string, history: string[]) => {
+    try {
+      const move = await flyClient.bestMove(fen, history);
+      if (!move) throw new Error(`${FLY_PLAYER_NAME} returned no move`);
+      return move;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      setNotice(`${FLY_PLAYER_NAME} could not move: ${message}`);
+      throw err;
+    }
+  };
 }
 
 /**
@@ -214,6 +243,9 @@ export function GameShell() {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const engineRef = useRef<SceneEngine | null>(null);
   const attractTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastMatch = useRef<MatchConfig | null>(null);
+  const matchGen = useRef(0);
+  const startingMatch = useRef(false);
 
   const controller = useMemo(() => new GameController(), []);
   const snapshot = useGameSnapshot(controller);
@@ -408,6 +440,7 @@ export function GameShell() {
   const scheduleAttract = useCallback(() => {
     const params = new URLSearchParams(window.location.search);
     if (params.get("autoplay") === "1" || params.get("jevfly") === "1") return;
+    if (startingMatch.current) return;
     if (attractTimer.current) clearTimeout(attractTimer.current);
     attractTimer.current = setTimeout(() => {
       if (phase !== "menu" || showSettings) return;
@@ -420,6 +453,7 @@ export function GameShell() {
 
   useEffect(() => {
     if (phase !== "menu" || attract || introPlaying) return;
+    if (startingMatch.current) return;
     scheduleAttract();
     return () => {
       if (attractTimer.current) clearTimeout(attractTimer.current);
@@ -428,10 +462,22 @@ export function GameShell() {
 
   // ------------------------------------------------------------------ actions
   const startMatch = useCallback(
-    (config: MatchConfig) => {
+    async (config: MatchConfig) => {
+      const gen = ++matchGen.current;
+      lastMatch.current = config;
+      startingMatch.current = true;
       stopAttract();
       void audio.unlock();
       audio.blip("press");
+      controller.clearMovers();
+      controller.setMaxPlies(null);
+      setFlyAnatomy(null);
+      setFlyThought(null);
+      setFlyThinking(false);
+      flyClient.onAnatomy = null;
+      flyClient.onThought = null;
+      flyClient.onThinking = null;
+
       const engine = engineRef.current;
       const showcase = config.mode === "demo";
       engine?.setAttract(false);
@@ -442,6 +488,41 @@ export function GameShell() {
       if (!showcase) {
         engine?.setCameraPreset(config.mode === "ai" && config.playerColor === "b" ? "black" : "white");
       }
+
+      if (config.mode === "ai" && (config.opponent === "jev" || config.opponent === "fly")) {
+        const aiColor: Faction = config.playerColor === "w" ? "b" : "w";
+        if (config.opponent === "fly") {
+          flyClient.difficulty = config.flyDifficulty ?? "fly";
+          flyClient.onAnatomy = setFlyAnatomy;
+          flyClient.onThought = setFlyThought;
+          flyClient.onThinking = setFlyThinking;
+          if (flyClient.anatomy) setFlyAnatomy(flyClient.anatomy);
+          try {
+            setNotice("Loading the fly brain…");
+            await flyClient.load("/model/");
+            if (gen !== matchGen.current) return;
+            setNotice(null);
+          } catch (err) {
+            if (gen !== matchGen.current) return;
+            setNotice(`Could not load the fly brain: ${err instanceof Error ? err.message : String(err)}`);
+            startingMatch.current = false;
+            return;
+          }
+          controller.setMovers(
+            { [aiColor]: makeFlyMover(setNotice) },
+            vsComputerSideNames("fly", config.playerColor),
+          );
+        } else {
+          const strategy = new URLSearchParams(window.location.search).get("strategy") || "best_this_turn";
+          controller.setMovers(
+            { [aiColor]: makeJevMover(strategy, setNotice) },
+            vsComputerSideNames("jev", config.playerColor),
+          );
+        }
+      }
+
+      if (gen !== matchGen.current) return;
+      startingMatch.current = false;
       controller.start({
         mode: config.mode,
         difficulty: config.difficulty,
@@ -456,6 +537,9 @@ export function GameShell() {
 
   const autoStarted = useRef(false);
   const startJevVsFly = useCallback(async () => {
+    const gen = ++matchGen.current;
+    lastMatch.current = null;
+    startingMatch.current = true;
     stopAttract();
     void audio.unlock();
     audio.blip("press");
@@ -475,33 +559,15 @@ export function GameShell() {
     try {
       await flyClient.load("/model/");
     } catch (err) {
+      if (gen !== matchGen.current) return;
       setNotice(`Could not load the fly brain: ${err instanceof Error ? err.message : String(err)}`);
       autoStarted.current = false;
+      startingMatch.current = false;
       return;
     }
-    const jevMover = async (fen: string) => {
-      try {
-        const move = await jevBestMove(fen, strategy);
-        if (!move) throw new Error("Jev returned no move");
-        setNotice(null);
-        return move;
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        setNotice(`Jev could not move: ${message}`);
-        throw err;
-      }
-    };
-    const flyMover = async (fen: string, history: string[]) => {
-      try {
-        const move = await flyClient.bestMove(fen, history);
-        if (!move) throw new Error(`${FLY_PLAYER_NAME} returned no move`);
-        return move;
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        setNotice(`${FLY_PLAYER_NAME} could not move: ${message}`);
-        throw err;
-      }
-    };
+    if (gen !== matchGen.current) return;
+    const jevMover = makeJevMover(strategy, setNotice);
+    const flyMover = makeFlyMover(setNotice);
     controller.setMovers(
       jevWhite
         ? { w: jevMover, b: flyMover }
@@ -511,6 +577,7 @@ export function GameShell() {
     controller.setMaxPlies(maxPlies);
     const wizardSkins = { w: "wizard" as const, b: "wizard" as const };
     const kinds = await wizardGlbKinds();
+    if (gen !== matchGen.current) return;
     setSettings((current) => ({
       ...current,
       arena: "dusk",
@@ -543,6 +610,7 @@ export function GameShell() {
       demo: { white: "medium", black: "medium", speed, autoRematch: false },
     });
     setCinema(cinemaEnabled(window.location.search));
+    startingMatch.current = false;
     setPhase("playing");
   }, [controller, showcaseCamera, stopAttract]);
 
@@ -581,6 +649,8 @@ export function GameShell() {
     controller.stop();
     controller.clearMovers();
     controller.setMaxPlies(null);
+    matchGen.current += 1;
+    startingMatch.current = false;
     const engine = engineRef.current;
     engine?.setTacticalView(false);
     engine?.setInteractive(false);
@@ -655,12 +725,16 @@ export function GameShell() {
       controller.restartDemo();
       return;
     }
-    startMatch({
-      mode: current.mode === "hotseat" ? "hotseat" : "ai",
-      difficulty: current.difficulty,
-      playerColor: current.playerColor,
-      clockMinutes: current.clock.enabled ? current.clock.initialMs / 60_000 : null,
-    });
+    const last = lastMatch.current;
+    void startMatch(
+      last ?? {
+        mode: current.mode === "hotseat" ? "hotseat" : "ai",
+        difficulty: current.difficulty,
+        playerColor: current.playerColor,
+        clockMinutes: current.clock.enabled ? current.clock.initialMs / 60_000 : null,
+        opponent: current.mode === "ai" ? "jev" : undefined,
+      },
+    );
   }, [controller, startMatch]);
 
   const handleFullscreen = useCallback(() => {
@@ -801,7 +875,7 @@ export function GameShell() {
 
         {phase === "menu" && !introPlaying ? (
           <MainMenu
-            onStart={startMatch}
+            onStart={(config) => void startMatch(config)}
             onJevVsFly={() => void startJevVsFly()}
             onOpenSettings={() => setShowSettings(true)}
             muster={{ skins: settings.skins, arena: settings.arena }}

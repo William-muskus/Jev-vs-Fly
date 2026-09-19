@@ -1,3 +1,5 @@
+import type { Faction } from "../core/types";
+
 /**
  * Query flags for a Jev vs Fly autoplay.
  *
@@ -6,6 +8,10 @@
  */
 export const JEV_PLAYER_NAME = "Jev";
 export const FLY_PLAYER_NAME = "Fruit Fly";
+export const HUMAN_PLAYER_NAME = "You";
+
+/** Who the human faces on the Computer tab. */
+export type ComputerOpponent = "jev" | "fly";
 
 export function cinemaEnabled(search = typeof window !== "undefined" ? window.location.search : ""): boolean {
   return new URLSearchParams(search).get("cinema") === "1";
@@ -16,4 +22,15 @@ export function jevFlySideNames(jevWhite = true): { w: string; b: string } {
   return jevWhite
     ? { w: JEV_PLAYER_NAME, b: FLY_PLAYER_NAME }
     : { w: FLY_PLAYER_NAME, b: JEV_PLAYER_NAME };
+}
+
+/** Wall-clock names when a human takes one banner against Jev or the fly. */
+export function vsComputerSideNames(
+  opponent: ComputerOpponent,
+  playerColor: Faction,
+): { w: string; b: string } {
+  const ai = opponent === "jev" ? JEV_PLAYER_NAME : FLY_PLAYER_NAME;
+  return playerColor === "w"
+    ? { w: HUMAN_PLAYER_NAME, b: ai }
+    : { w: ai, b: HUMAN_PLAYER_NAME };
 }
