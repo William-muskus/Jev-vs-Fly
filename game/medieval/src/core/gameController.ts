@@ -854,7 +854,7 @@ export class GameController extends Emitter<ControllerEvents> {
       return true;
     }
     if (this.maxPlies !== null && this.chess.history().length >= this.maxPlies) {
-      this.finish({ winner: null, reason: "draw" });
+      this.finish({ winner: null, reason: "plycap" });
       return true;
     }
     return false;
@@ -924,6 +924,7 @@ export class GameController extends Emitter<ControllerEvents> {
     const turn = this.chess.turn() as Faction;
     if (mode === "ai" && turn === this.options.playerColor) return;
     if (this.thinking) return;
+    if (this.checkEnd()) return;
 
     const generation = this.generation;
     this.thinking = true;

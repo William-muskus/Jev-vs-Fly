@@ -35,7 +35,8 @@ export type EndReason =
   | "threefold"
   | "insufficient"
   | "fiftymove"
-  | "draw";
+  | "draw"
+  | "plycap";
 
 export interface GameResult {
   /** Winner, or null for a draw. */

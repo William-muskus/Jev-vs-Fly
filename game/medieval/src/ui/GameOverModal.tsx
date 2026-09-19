@@ -44,6 +44,7 @@ const REASON_COPY: Record<EndReason, string> = {
   insufficient: "Insufficient material",
   fiftymove: "Fifty-move rule",
   draw: "Drawn position",
+  plycap: "The duel was called after the agreed number of moves",
 };
 
 export function GameOverModal({
