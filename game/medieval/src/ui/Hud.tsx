@@ -278,7 +278,7 @@ export function Hud({
             <div>
               <p className="mc-display text-[0.58rem] tracking-[0.3em] text-[#a89268]">
                 {demo
-                  ? `Jev vs Fly · duel ${snapshot.demoRound}`
+                  ? `${sideName(snapshot, "w")} vs ${sideName(snapshot, "b")} · duel ${snapshot.demoRound}`
                   : snapshot.status === "over"
                     ? "Battle ended"
                     : snapshot.thinking
