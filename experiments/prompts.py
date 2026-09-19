@@ -152,7 +152,7 @@ def _answers_from(result: Any) -> tuple[dict[str, ChoiceView], dict[str, int], s
 def default_system_one(state: Any, questions: Mapping[str, Any]) -> Any:
     from typesafe_sdk import TypeSafeClient
 
-    with TypeSafeClient(timeout=30.0) as client:
+    with TypeSafeClient(timeout=90.0) as client:
         return client.system_one(state, questions)
 
 

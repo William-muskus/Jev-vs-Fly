@@ -18,6 +18,7 @@ import { factionRingTexture, radialTexture } from "./textures";
 import { Ease, type TweenManager } from "./tween";
 import { armSculptWarmJobs, attachWeapons, type AttachedArms } from "./weapons";
 import { buildWizardChessPiece } from "./wizardPieces";
+import { wizardGlbKinds } from "./wizardRoster";
 
 /**
  * Rendered height (world units, 1 unit = 1 board square) per piece kind.
@@ -1955,13 +1956,16 @@ export class PieceFactory {
     }
     if (!still) throw new Error(`no sculpt url for ${faction}${kind}`);
     if (still === "procedural:wizard") {
-      const local = `/models/wizard/${kind}.glb`;
-      try {
-        const gltf = await loadGltf(this.loader, local, 1);
-        return this.normalize(gltf.scene, kind, {}, false, skin.arsenal);
-      } catch {
-        return this.normalize(buildWizardChessPiece(kind), kind, {}, false, skin.arsenal);
+      const kinds = await wizardGlbKinds();
+      if (kinds.has(kind)) {
+        try {
+          const gltf = await loadGltf(this.loader, `/models/wizard/${kind}.glb`, 1);
+          return this.normalize(gltf.scene, kind, {}, false, skin.arsenal);
+        } catch (error) {
+          console.warn(`[pieces] wizard GLB for ${kind} failed, using stone`, error);
+        }
       }
+      return this.normalize(buildWizardChessPiece(kind), kind, {}, false, skin.arsenal);
     }
     const gltf = await loadGltf(this.loader, still);
     return this.normalize(gltf.scene, kind, {}, true, skin.arsenal);

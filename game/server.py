@@ -20,6 +20,9 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from experiments.prompts import STRATEGIES, pick_move
+from game.envload import jev_configured, load_repo_env
+
+load_repo_env()
 
 REPO = Path(__file__).resolve().parent.parent
 STATIC = Path(__file__).resolve().parent / "static"
@@ -84,7 +87,7 @@ def create_app(
 
     @app.get("/health")
     def health() -> dict[str, Any]:
-        return {"ok": True, "strategies": list(STRATEGIES)}
+        return {"ok": True, "jev_configured": jev_configured(), "strategies": list(STRATEGIES)}
 
     @app.get("/api/strategies")
     def strategies() -> dict[str, Any]:
@@ -115,6 +118,11 @@ def create_app(
             raise HTTPException(400, str(e)) from e
         except Exception as e:
             raise HTTPException(502, f"Jev request failed: {e}") from e
+        print(
+            f"Jev played {pick.san} ({pick.uci}) strategy={pick.strategy} "
+            f"latency={pick.latency_s:.2f}s skipped_api={pick.skipped_api}",
+            flush=True,
+        )
         return JSONResponse(pick.to_json())
 
     @app.get("/model/{name}")

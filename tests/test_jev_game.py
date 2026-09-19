@@ -16,6 +16,8 @@ def test_health_and_strategies():
     c = client()
     h = c.get("/health")
     assert h.status_code == 200 and h.json()["ok"] is True
+    assert "jev_configured" in h.json()
+    assert "best_this_turn" in h.json()["strategies"]
     s = c.get("/api/strategies").json()
     assert "best_this_turn" in s["strategies"]
     assert s["default"] == "best_this_turn"

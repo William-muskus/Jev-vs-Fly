@@ -460,8 +460,29 @@ export function GameShell() {
       setNotice(`Could not load the fly brain: ${err instanceof Error ? err.message : String(err)}`);
       return;
     }
-    const jevMover = (fen: string) => jevBestMove(fen, strategy);
-    const flyMover = (fen: string, history: string[]) => flyClient.bestMove(fen, history);
+    const jevMover = async (fen: string) => {
+      try {
+        const move = await jevBestMove(fen, strategy);
+        if (!move) throw new Error("Jev returned no move");
+        setNotice(null);
+        return move;
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        setNotice(`Jev could not move: ${message}`);
+        throw err;
+      }
+    };
+    const flyMover = async (fen: string, history: string[]) => {
+      try {
+        const move = await flyClient.bestMove(fen, history);
+        if (!move) throw new Error("Fly returned no move");
+        return move;
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        setNotice(`Fly could not move: ${message}`);
+        throw err;
+      }
+    };
     controller.setMovers(
       jevWhite
         ? { w: jevMover, b: flyMover }

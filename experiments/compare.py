@@ -241,6 +241,9 @@ def main(argv: list[str] | None = None) -> int:
             print("  state keys:", list(position_state(board)))
         return 0
 
+    from game.envload import load_repo_env
+
+    load_repo_env()
     if not os.environ.get("TYPESAFE_API_KEY"):
         print("TYPESAFE_API_KEY is not set. Export it or pass --dry-run.", file=sys.stderr)
         return 2

@@ -106,6 +106,7 @@ def test_package_api_surface():
     # importing the sub-packages rebinds flychess.train / flychess.play to (callable) modules
     import importlib
 
+    pytest.importorskip("torch")
     importlib.import_module("flychess.play")
     importlib.import_module("flychess.train.trainer")
     assert callable(flychess.train) and callable(flychess.play)

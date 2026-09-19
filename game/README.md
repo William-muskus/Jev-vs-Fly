@@ -14,7 +14,9 @@ combat roll — and the hall calls each move in English (*White knight to F3!*).
 The 3D hall is vendored from [King's Gambit](https://github.com/alexngdev99/rork-medieval-3d-chess)
 (MIT). The gothic-Staunton army is original. If you have nbauchat's Cults STLs
 locally (private-use, not redistributed here), convert them with
-`python -m game.wizard_assets --src …` and they replace the procedural set.
+`python -m game.wizard_assets` (searches known drop paths) or
+`python -m game.wizard_assets --src /path/to/nbauchat/harry-potter-chess`.
+They replace the procedural set via `public/models/wizard/manifest.json`.
 
 ```
   browser                         this server
@@ -26,7 +28,8 @@ locally (private-use, not redistributed here), convert them with
 ## Run
 
 ```bash
-export TYPESAFE_API_KEY=…     # required for Jev; never committed
+# required for Jev; never committed — a gitignored `.env` at the repo root also works
+export TYPESAFE_API_KEY=…
 python -m game.server         # API + classic 2D  http://127.0.0.1:8766/
 cd game/medieval && npm install && npm run dev
 # wizard chess 3D → http://127.0.0.1:8080/?autoplay=1
