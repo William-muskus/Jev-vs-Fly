@@ -52,9 +52,13 @@ Classic 2D: http://127.0.0.1:8766/
 
 Query flags: `strategy=best_this_turn|best_win_rate|both_turn_then_win|both_win_then_turn`,
 `difficulty=larva|fly|superfly`, `jevColor=white|black`, `maxPlies=80`,
-`speed=1`, `cinema=1`, `cinematics=1`, `wizardYaw=180`. `speed` scales think time *and* smash
-beats (try `speed=4` so a full game is watchable). `cinematics=0` skips the
-long capture camera work.
+`speed=1`, `cinema=1`, `cinematics=1`. Cults STLs are Z-up (print bed), so
+without a tip they lie **parallel** to the board. The hall now rotates the
+tallest axis onto +Y so they stand **perpendicular**. Facing is `wizardYaw=0`
+(the default — you do not need the query flag). If a mesh still lies flat,
+`?wizardUp=z` forces that tip; `?wizardUp=none` skips it. `speed` scales think
+time *and* smash beats (try `speed=4` so a full game is watchable).
+`cinematics=0` skips the long capture camera work.
 
 If `python -m game.server` dies with **WinError 10048** / *une seule utilisation
 de chaque adresse de socket*, port **8766 is already taken**. Usually the API
@@ -109,10 +113,14 @@ on the hall reports `Loaded 6/6 local wizard sculpts`. If it says the stone
 army is standing in, the GLBs are not on that machine (the cloud recording
 never has them — they are private-use and not in the repo).
 
-If the horses look at you instead of the far rank, the hall yaws them 180°.
-Try `?wizardYaw=90` or `?wizardYaw=0` if a different turn is right — no need
-to reconvert.
+After `git pull`, restart `npm run dev` and hard-reload
+(`Ctrl+Shift+R`) `http://127.0.0.1:8080/?autoplay=1`. You do **not** need to
+reconvert the GLBs — the loader stands Z-up prints on +Y. `wizardYaw=0` is
+already the default facing.
 
-Reload the menu with Ctrl+Shift+R after `git pull`. Old King's Gambit
-saves used to restore the Ivory army on the title screen; this fork now
-remembers armies under `jevfly.armies` and defaults both sides to wizard.
+If they still lie flat: `?wizardUp=z`. If a rank looks sideways after they
+stand: `?wizardYaw=90` or `180`. `?wizardUp=none` turns the tip off.
+
+Old King's Gambit saves used to restore the Ivory army on the title screen;
+this fork now remembers armies under `jevfly.armies` and defaults both sides
+to wizard.

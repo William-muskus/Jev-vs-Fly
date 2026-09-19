@@ -40,16 +40,39 @@ export function resetWizardRoster(): void {
 }
 
 /**
- * Yaw applied to Cults GLBs so local +Z (the hall's "front") matches the sculpt.
- * nbauchat's set faces the camera as exported; 180° turns them toward the enemy.
- * Override live with `?wizardYaw=90` (degrees) without reconverting.
+ * Yaw around world up. Cults STLs already face the enemy in XY; default 0.
+ * Override with `?wizardYaw=90` (degrees) without reconverting.
  */
 export function wizardYawRadians(search = typeof window !== "undefined" ? window.location.search : ""): number {
   const raw = new URLSearchParams(search).get("wizardYaw");
-  if (raw === null || raw === "") return Math.PI;
+  if (raw === null || raw === "") return 0;
   const deg = Number(raw);
-  if (!Number.isFinite(deg)) return Math.PI;
+  if (!Number.isFinite(deg)) return 0;
   return (deg * Math.PI) / 180;
+}
+
+export interface AxisSize {
+  x: number;
+  y: number;
+  z: number;
+}
+
+/**
+ * Print-bed STLs are Z-up, so they lie on the hall's XZ board. Rotate the
+ * tallest axis onto +Y. `?wizardUp=none` skips this; `?wizardUp=z` forces the
+ * Z-up correction.
+ */
+export function wizardStandEuler(
+  size: AxisSize,
+  search = typeof window !== "undefined" ? window.location.search : "",
+): { x: number; y: number; z: number } {
+  const raw = (new URLSearchParams(search).get("wizardUp") ?? "").toLowerCase();
+  if (raw === "none" || raw === "0") return { x: 0, y: 0, z: 0 };
+  if (raw === "z") return { x: -Math.PI / 2, y: 0, z: 0 };
+  if (raw === "x") return { x: 0, y: 0, z: Math.PI / 2 };
+  if (size.y >= size.x && size.y >= size.z) return { x: 0, y: 0, z: 0 };
+  if (size.z >= size.x && size.z >= size.y) return { x: -Math.PI / 2, y: 0, z: 0 };
+  return { x: 0, y: 0, z: Math.PI / 2 };
 }
 
 /**

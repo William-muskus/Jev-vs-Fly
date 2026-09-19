@@ -18,7 +18,7 @@ import { factionRingTexture, radialTexture } from "./textures";
 import { Ease, type TweenManager } from "./tween";
 import { armSculptWarmJobs, attachWeapons, type AttachedArms } from "./weapons";
 import { buildWizardChessPiece } from "./wizardPieces";
-import { wizardGlbKinds, wizardYawRadians } from "./wizardRoster";
+import { wizardGlbKinds, wizardStandEuler, wizardYawRadians } from "./wizardRoster";
 
 /**
  * Rendered height (world units, 1 unit = 1 board square) per piece kind.
@@ -1960,7 +1960,16 @@ export class PieceFactory {
       if (kinds.has(kind)) {
         try {
           const gltf = await loadGltf(this.loader, `/models/wizard/${kind}.glb`, 1);
-          gltf.scene.rotateY(wizardYawRadians());
+          // Cults prints are Z-up (print bed). Tip the tall axis onto +Y so the
+          // figure stands perpendicular to the hall's XZ board, then optional yaw.
+          // Facing (white −Z / black +Z) is applied later in create().
+          const size = new THREE.Vector3();
+          measureModel(gltf.scene).getSize(size);
+          const stand = wizardStandEuler({ x: size.x, y: size.y, z: size.z });
+          if (stand.x) gltf.scene.rotateX(stand.x);
+          if (stand.z) gltf.scene.rotateZ(stand.z);
+          const yaw = wizardYawRadians();
+          if (yaw) gltf.scene.rotateY(yaw);
           return this.normalize(gltf.scene, kind, {}, false, skin.arsenal);
         } catch (error) {
           console.warn(`[pieces] wizard GLB for ${kind} failed, using stone`, error);

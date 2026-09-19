@@ -500,11 +500,13 @@ export function GameShell() {
     );
     controller.setMaxPlies(maxPlies);
     const wizardSkins = { w: "wizard" as const, b: "wizard" as const };
+    const kinds = await wizardGlbKinds();
     setSettings((current) => ({
       ...current,
       arena: "dusk",
       skins: wizardSkins,
       captureCinematics: cinematics,
+      rankBadges: kinds.size === 0,
     }));
     const engine = engineRef.current;
     engine?.setAttract(false);
@@ -514,7 +516,7 @@ export function GameShell() {
     engine?.setCaptureCinematics(cinematics);
     engine?.setPlaybackRate(speed);
     engine?.setShowcase(true, showcaseCamera);
-    const kinds = await wizardGlbKinds();
+    engine?.setRankBadges(kinds.size === 0);
     if (kinds.size === 0) {
       setNotice(
         "No local Cults GLBs here — this is the stone army. On your PC run python -m game.wizard_assets then reload.",

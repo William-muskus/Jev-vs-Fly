@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import sys
 import tempfile
@@ -119,6 +120,23 @@ def write_manifest(dest: Path, kinds: list[str]) -> Path:
     return path
 
 
+def tallest_axis(extents: tuple[float, float, float]) -> int:
+    """0=X, 1=Y, 2=Z — print-bed chess STLs are usually tallest in Z."""
+    return max(range(3), key=lambda i: extents[i])
+
+
+def stand_y_up(mesh: object) -> None:
+    """Rotate so the sculpt's tallest axis is +Y (the hall's up)."""
+    import trimesh
+
+    extents = (float(mesh.extents[0]), float(mesh.extents[1]), float(mesh.extents[2]))
+    up = tallest_axis(extents)
+    if up == 2:
+        mesh.apply_transform(trimesh.transformations.rotation_matrix(-math.pi / 2, [1.0, 0.0, 0.0]))
+    elif up == 0:
+        mesh.apply_transform(trimesh.transformations.rotation_matrix(math.pi / 2, [0.0, 0.0, 1.0]))
+
+
 def convert(src: Path, dest: Path = OUT) -> dict[str, Path]:
     try:
         import trimesh
@@ -141,6 +159,7 @@ def convert(src: Path, dest: Path = OUT) -> dict[str, Path]:
         mesh = trimesh.load(stl, force="mesh")
         if isinstance(mesh, trimesh.Scene):
             mesh = trimesh.util.concatenate(tuple(mesh.dump(concatenate=False)))
+        stand_y_up(mesh)
         mesh.apply_translation(-mesh.bounds[0])
         # Sit on y=0, centred in x/z, Y-up.
         mesh.apply_translation([-mesh.centroid[0], 0, -mesh.centroid[2]])

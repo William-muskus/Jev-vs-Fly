@@ -5,7 +5,9 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from game.wizard_assets import STL_ALIASES, find_src, map_stls, write_manifest
+import pytest
+
+from game.wizard_assets import STL_ALIASES, find_src, map_stls, tallest_axis, write_manifest
 
 
 def test_nbauchat_filenames_map_to_ranks(tmp_path: Path):
@@ -35,3 +37,18 @@ def test_find_src_uses_wizard_stl_dir(tmp_path: Path, monkeypatch):
     (tmp_path / "king3.stl").write_text("solid", encoding="utf-8")
     monkeypatch.setenv("WIZARD_STL_DIR", str(tmp_path))
     assert find_src() == tmp_path
+
+
+def test_tallest_axis_is_print_bed_z():
+    assert tallest_axis((10.0, 8.0, 90.0)) == 2
+    assert tallest_axis((4.0, 40.0, 5.0)) == 1
+    assert tallest_axis((50.0, 3.0, 4.0)) == 0
+
+
+def test_stand_y_up_tips_z_print_onto_y():
+    trimesh = pytest.importorskip("trimesh")
+    from game.wizard_assets import stand_y_up
+
+    mesh = trimesh.creation.box(extents=(2.0, 3.0, 12.0))
+    stand_y_up(mesh)
+    assert tallest_axis(tuple(float(v) for v in mesh.extents)) == 1
