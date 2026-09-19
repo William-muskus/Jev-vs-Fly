@@ -191,6 +191,40 @@ def cmd_play(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_jev_compare(args: argparse.Namespace) -> int:
+    from experiments.compare import main as compare_main
+
+    argv: list[str] = ["--out", args.out]
+    if args.ids:
+        argv += ["--ids", args.ids]
+    if args.dry_run:
+        argv.append("--dry-run")
+    return compare_main(argv)
+
+
+def cmd_jev_vs_fly(args: argparse.Namespace) -> int:
+    import subprocess
+    from pathlib import Path
+
+    from game.server import serve
+
+    medieval = Path(__file__).resolve().parent.parent / "game" / "medieval"
+    vite = None
+    if args.ui != "classic" and (medieval / "package.json").is_file():
+        if (medieval / "node_modules").is_dir():
+            vite = subprocess.Popen(["npm", "run", "dev"], cwd=medieval)
+            print("Wizard chess 3D → http://127.0.0.1:8080/?autoplay=1")
+        else:
+            print("3D hall: cd game/medieval && npm install && npm run dev → http://127.0.0.1:8080/?autoplay=1")
+    print(f"Jev API + classic 2D → http://{args.host}:{args.port}/")
+    try:
+        serve(host=args.host, port=args.port)
+    finally:
+        if vite is not None:
+            vite.terminate()
+    return 0
+
+
 def cmd_eval(args: argparse.Namespace) -> int:
     from flychess.eval.elo import evaluate_run
 
@@ -414,6 +448,21 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--out", default=None, help="output json (default tests/vectors/model.json)")
     s.add_argument("--quant", choices=("f16", "f32", "i8"), default="f16")
 
+    s = sub.add_parser("jev-compare", help="compare four Jev chess-move prompt strategies",
+                       description="Ask Jev to pick a move four ways on curated positions and write a comparison.")
+    s.add_argument("--out", default="experiments/results", help="directory for comparison.json / comparison.md")
+    s.add_argument("--ids", default=None, help="comma-separated position ids (default: all)")
+    s.add_argument("--dry-run", action="store_true", help="print the requests; do not call TypeSafe")
+
+    s = sub.add_parser("jev-vs-fly", help="serve the Jev vs Fly wizard-chess match (browser fly + server-side Jev)",
+                       description="The fly brain runs in the browser from the published connectome blob; "
+                                   "Jev's moves come from /api/jev-move. The 3D hall is wizard chess. "
+                                   "Requires TYPESAFE_API_KEY.")
+    s.add_argument("--host", default="127.0.0.1")
+    s.add_argument("--port", type=int, default=8766)
+    s.add_argument("--ui", choices=("wizard", "classic", "both"), default="both",
+                   help="start the 3D hall (wizard), the classic 2D page, or both")
+
     return p
 
 
@@ -427,6 +476,8 @@ COMMANDS = {
     "eval": cmd_eval,
     "export-web": cmd_export_web,
     "test-vectors": cmd_test_vectors,
+    "jev-compare": cmd_jev_compare,
+    "jev-vs-fly": cmd_jev_vs_fly,
 }
 
 

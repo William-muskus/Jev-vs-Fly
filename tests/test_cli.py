@@ -22,7 +22,7 @@ def test_parser_lists_every_spec_subcommand():
     sub = next(a for a in p._actions if a.dest == "command")
     names = set(sub.choices)
     assert {"download", "build-brain", "build-shards", "train", "dashboard", "play", "eval",
-            "export-web", "test-vectors"} <= names
+            "export-web", "test-vectors", "jev-compare", "jev-vs-fly"} <= names
 
 
 def test_train_args_and_set_overrides():
@@ -55,6 +55,10 @@ def test_play_and_eval_args():
     assert a.quant == "i8" and a.out == "/tmp/m" and not a.no_vectors
     a = build_parser().parse_args(["dashboard", "--run", "r", "--port", "9999"])
     assert a.port == 9999 and a.command == "dashboard"
+    a = build_parser().parse_args(["jev-compare", "--dry-run", "--ids", "start,italian"])
+    assert a.command == "jev-compare" and a.dry_run and a.ids == "start,italian"
+    a = build_parser().parse_args(["jev-vs-fly", "--port", "9000"])
+    assert a.command == "jev-vs-fly" and a.port == 9000 and a.ui == "both"
 
 
 def test_main_dispatches_and_maps_errors(monkeypatch):

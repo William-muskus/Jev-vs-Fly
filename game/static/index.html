@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Jev vs Fly</title>
+  <link rel="icon" href="/assets/fly.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="top">
+    <div class="brand">
+      <span class="jev-mark">Jev</span>
+      <span class="vs">vs</span>
+      <span class="fly-mark">Fly</span>
+    </div>
+    <p class="lede">TypeSafe's decision model against a fruit-fly connectome. Same board. Different kind of mind.</p>
+  </header>
+
+  <section class="setup" id="setup">
+    <label>Jev strategy
+      <select id="strategy">
+        <option value="best_this_turn" selected>best this turn</option>
+        <option value="best_win_rate">best for win rate</option>
+        <option value="both_turn_then_win">both (turn, then win rate)</option>
+        <option value="both_win_then_turn">both (win rate, then turn)</option>
+      </select>
+    </label>
+    <label>Fly strength
+      <select id="difficulty">
+        <option value="larva">larva</option>
+        <option value="fly" selected>fly</option>
+        <option value="superfly">superfly</option>
+      </select>
+    </label>
+    <label>Jev plays
+      <select id="jev-color">
+        <option value="white" selected>White</option>
+        <option value="black">Black</option>
+      </select>
+    </label>
+    <button class="btn primary" id="btn-start" type="button" disabled>Growing the fly…</button>
+    <div class="load" id="load">
+      <div class="bar"><div class="bar-fill" id="bar-fill"></div></div>
+      <span class="mono" id="load-msg">connecting to the connectome…</span>
+    </div>
+    <p class="err" id="load-error" hidden></p>
+  </section>
+
+  <main class="arena" id="arena" hidden>
+    <aside class="player jev" id="jev-panel">
+      <div class="who"><span class="tag jev-tag">Jev</span> <span class="side" id="jev-side">White</span></div>
+      <p class="status" id="jev-status">waiting</p>
+      <ol class="probs mono" id="jev-probs"></ol>
+      <p class="meta mono" id="jev-meta"></p>
+    </aside>
+
+    <section class="board-col">
+      <div class="board-frame"><div id="board"></div></div>
+      <p class="turn" id="turn">Jev to move</p>
+      <p class="result" id="result" hidden></p>
+    </section>
+
+    <aside class="player fly" id="fly-panel">
+      <div class="who"><span class="tag fly-tag">Fly</span> <span class="side" id="fly-side">Black</span></div>
+      <p class="status" id="fly-status">watching</p>
+      <ol class="probs mono" id="fly-probs"></ol>
+      <p class="meta mono" id="fly-meta"></p>
+    </aside>
+  </main>
+
+  <section class="moves-wrap" id="moves-wrap" hidden>
+    <ol class="moves mono" id="moves"></ol>
+    <div class="row">
+      <button class="btn" id="btn-pgn" type="button">Copy PGN</button>
+      <button class="btn" id="btn-new" type="button">New game</button>
+    </div>
+  </section>
+
+  <script type="module" src="/app.js"></script>
+</body>
+</html>

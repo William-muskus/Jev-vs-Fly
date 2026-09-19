@@ -1,0 +1,24 @@
+{
+  "name": "jev-chess",
+  "version": "1.0.0",
+  "description": "A chess player whose search is code and whose taste is Jev.",
+  "main": "index.js",
+  "scripts": {
+    "play": "tsx src/play.ts",
+    "check": "tsc --noEmit",
+    "probe": "tsx src/probe.ts"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@typesafe-ai/sdk": "^0.6.0",
+    "chess.js": "^1.4.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.2",
+    "tsx": "^4.23.13",
+    "typescript": "^7.0.2"
+  },
+  "type": "module"
+}

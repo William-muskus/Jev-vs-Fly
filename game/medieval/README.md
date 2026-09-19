@@ -1,0 +1,1337 @@
+# King's Gambit — the app
+
+This folder holds the game itself. For the project overview, features, architecture notes and
+contribution guide, read the [root README](../README.md) and [CONTRIBUTING.md](../CONTRIBUTING.md).
+
+A cinematic 3D chess game: sculpted medieval, Mesoamerican and Napoleonic figures fighting on a
+marble-and-basalt board. Built with Vite + React + TypeScript + three.js, with chess.js for
+the rules and a Web Worker search engine for the computer opponent.
+
+## Setup
+
+```bash
+bun install   # or npm install
+bun run dev   # or npm run dev  → http://localhost:5173
+bun run build # production bundle in dist/
+bun run preview
+```
+
+## Controls
+
+| Action | Input |
+| --- | --- |
+| Orbit / zoom | Drag, mouse wheel (pinch on touch) |
+| Playing on a phone | Nothing to set — the framing is solved for the screen, see [Screen framing](#screen-framing) |
+| Select a figure | Click it (legal squares glow green, captures red) |
+| Promotion | Tap a candidate, or press `Q` `R` `B` `N` — see [The promotion picker](#the-promotion-picker) |
+| Move | Click a highlighted square — including one standing behind a figure, see [Clicking a square behind a figure](#clicking-a-square-behind-a-figure) (click the figure again to deselect) |
+| Camera | Camera icon in the top bar (presets, flip, tactical) |
+| Queue a move | While the machine is thinking, tap your figure then its square — it plays itself the instant the turn returns, see [Queuing a move while the machine thinks](#queuing-a-move-while-the-machine-thinks) |
+| Two players on one screen | The board does **not** turn itself between turns — see [Hotseat: the view holds still](#hotseat-the-view-holds-still) |
+| Armies & battleground | Picked on the main menu before the duel; read-only in settings once a duel is running |
+| What a button does | Hover, focus or tap it — every icon carries a tooltip |
+| Skip the intro | Click anywhere during the opening sweep |
+| Settings | Gear icon (graphics preset, brightness, capture cinematics, board swing, queued moves, rank crests, sound) |
+
+There is no drag-and-drop; both selecting and moving resolve on pointer release, and a press
+that travels more than 8px (16px for a finger) counts as a camera swing instead.
+
+Key hints are printed only on devices that have keys — see [Key hints only where there are
+keys](#key-hints-only-where-there-are-keys).
+
+| Key | Action |
+| --- | --- |
+| `F` | Flip the camera to the other side |
+| `T` | Toggle the 2D tactical view |
+| `H` | Open / fold the chronicle |
+| `C` | Cinema mode — hide the whole overlay |
+| `Space` | Pause / resume a showcase duel |
+| `Esc` | Close the settings panel, camera menu, chronicle or tooltip — then take back a queued move |
+
+### Key hints only where there are keys
+
+Every shortcut hint was unconditional, so a phone was told to press keys it does not have in **13
+places**: 4 key caps still reachable in the tooltips (`T`, `H`, `C`, `Space` — `F` was already
+`wideOnly`), 3 native `title` reminders (`(T)`, `(F)` in the camera menu, `(C)` on the cinema restore
+button), and 6 lines of copy (the promotion banner's *OR PRESS Q R B N*, the menu's *SCROLL TO ZOOM ·
+CLICK A FIGURE*, *CLICK TO SKIP*, the hotseat and AI-vs-AI blurbs, the board-swing note). That is
+noise on the screen with the least room for it, and it also mis-describes the gesture: there is no
+scroll wheel to zoom with and no click to skip an intro.
+
+`src/ui/inputMode.ts` answers the one question that matters — `useHasKeyboard()`:
+
+- The test is `(pointer: coarse) and (hover: none)`, not a user-agent string. A touchscreen laptop
+  still reports `hover: hover` because it also has a trackpad, so it keeps its key caps.
+- **A real keydown overrides the media query.** An iPad in a case keyboard proves it has keys the
+  first time one arrives, and every hint reappears — trusted events only, and keys typed into an
+  `input`/`textarea`/`contenteditable` are ignored, because an on-screen keyboard fires those too.
+- One `useSyncExternalStore` subscription is shared by all callers (~20 tooltips), so the twenty
+  controls do not open twenty media listeners.
+
+`Tooltip.tsx` drops the cap itself, so callers keep passing `keys="T"` unconditionally and no control
+has to know what it is being read on. Where the gesture genuinely differs the copy changes rather
+than disappearing: *PINCH TO ZOOM*, *TAP A FIGURE TO COMMAND IT*, *TAP TO SKIP*, and “flip from the
+camera menu” instead of “flip with `F`”. The shortcuts themselves are untouched — this is about what
+is advertised, not what works.
+
+### Hotseat: the view holds still
+
+Two-player hotseat used to swing the camera a **half turn round the hall after every ply**, on by
+default. That is the single heaviest camera move in the game, and in hotseat it fires **twice a
+minute** — at chess pace, roughly every 15–30 seconds, forever. It also fires *unbidden*, at the end
+of a move the player was already tracking, which is exactly the recipe for motion sickness: a large
+vestibular-conflict movement the viewer did not initiate and cannot predict. Players sitting side by
+side at one screen do not need the board re-oriented anyway — they need to keep their bearings.
+
+So `rotateBoard` now defaults to **off** and the choice is **remembered** (`kg.table` in
+`localStorage`, alongside the render and army prefs). Reaching for it is one toggle in settings
+(*Swing camera between turns*), and when it is on the swing is slower than it was — **1.15s → 1.8s**,
+so it reads as the hall turning rather than a cut. The manual flip is untouched: `F`, or the flip
+button in the camera menu, still turns the view instantly whenever a player wants it, and being asked
+for is what makes it comfortable.
+
+### Queuing a move while the machine thinks
+
+The board went **deaf** the moment the player's move was made: `onPointerUp` early-returned on
+`!isHumanTurn()`, so every tap during the reply was thrown away — including the taps of a player who
+already knew exactly what they wanted to play.
+
+How long that deafness lasts, replayed headless through the real `engine.worker.ts` search over full
+games (8 games easy and medium, 3 hard, 60 plies each):
+
+| Difficulty | Search, mean | p50 | p90 | max | Felt wait per ply |
+| --- | --- | --- | --- | --- | --- |
+| Easy | 7 ms | 6 ms | 10 ms | 15 ms | 420 ms (the anti-robotic floor *is* the wait) |
+| Medium | 615 ms | 698 ms | 837 ms | 979 ms | ~0.65 s |
+| Hard | 3070 ms | 3328 ms | 3538 ms | 3582 ms | ~3.1 s |
+
+And the search is only the first half: the reply is then *performed*. A plain march is clamped to
+0.34–2.4 s of walking (`glide`), a capture adds the battle beat on top, and `busy` is held down for
+all of it. So on hard the board is out of the player's hands for **four to six seconds every single
+ply** — with a clock running, that is the player's own time being spent watching.
+
+**Which squares are offered.** A premove is aimed at a position that does not exist yet, so
+`premoveTargets()` reads a figure's *geometry* rather than the board: rays run the full length of
+the file regardless of what is standing in them, a pawn is offered both diagonals whether or not
+there is anything to take, and the king is offered `g1`/`c1` from its home square. A blocker is not
+a reason to withhold a square — the blocker may well be the thing that moves.
+
+That generosity costs accuracy, and it was measured too. Queueing a *random* geometric move from a
+random own piece survives the reply **40.3% (easy) / 32.6% (medium) / 32.4% (hard)** of the time.
+But nobody queues at random: restricted to moves that are already legal at the moment they are
+placed — the sensible ones — survival is **73.9%**, and the 26% that die are almost entirely
+*king in check* (18.0%) and *path blocked* (8.1%), with the queued piece being captured outright
+too rare to register in 111 samples. Three moves in four are worth the wait they save.
+
+**One move was not enough for bullet.** A single queued move fills one wait; a blitz player already
+knows their next three. So the queue is a **chain** now — up to five links, three by default — and
+the depth was measured before it was chosen.
+
+241 chains, five deep, against the medium engine, each link aimed at the board the links before it
+leave behind (the same way a player builds one), then played out for real with the engine replying
+between every link:
+
+| Link | Survives its reply | Whole chain alive this deep |
+| --- | --- | --- |
+| 1 | 59.6% (235 attempts) | 59.6% |
+| 2 | 69.9% (123) | 41.7% |
+| 3 | 72.2% (79) | 30.1% |
+| 4 | 90.9% (55) | 27.3% |
+| 5 | 72.0% (50) | 19.7% |
+
+The shape is the interesting part, and it is the opposite of the intuition that made us cap it at
+one: **the deeper links survive more often than the head**, because by the time link 3 is due the
+reply has already agreed with the plan twice. What decays is the *chain*, not the link. Of 1039
+links queued, 369 were actually played — **1.53 moves per chain**, and 35.5% of everything queued.
+At three deep the tail still pays for itself; past it, links are queued far more often than played,
+which is why five is offered but not the default. Deaths split 75 *piece gone* / 73 *king in check*
+/ 25 *path blocked*.
+
+**A check is not one more way to die — it is the end of the plan.** *King in check* was already the
+second-largest killer in the table above, and the chain was still being held on screen through the
+whole checking move, then quietly failing when the board was handed back. So the check case was
+measured on its own: 949 thinking windows with a chain standing against the medium engine, 190 of
+them ended by a checking reply.
+
+| After the reply | Head still playable | Whole chain still alive |
+| --- | --- | --- |
+| Quiet reply (759) | 79.2% | — |
+| **Checking reply (190)** | **7.9%** (15) | **3.2%** (6) |
+
+And the fifteen survivors are not the argument they look like: **fourteen of them were the king
+happening to step somewhere legal**, one was a block, none was a capture of the checking piece. A
+queued king step that survives a check is an accident, not a plan — it was aimed at a board where
+nobody was shouting at the king, and it is being cashed in the sharpest position of the game.
+
+So `commit()` calls `dropPremovesOnCheck()` **before the animator runs**, the instant the checking
+move lands, rather than leaving it to `consumePremove()` seconds later. The marks die with the move
+that killed them; they never sit lit over a plan the check has already ended.
+
+**The other half is the squares that stay on offer.** The queueing window is open during the check
+cinematic too (`canPremove()` is `!isHumanTurn()`, and `busy` is still held), so a player can queue
+*into* a position where their king is under attack — and the geometry that makes premoves generous
+turns into a liar there. Over those same 190 check positions, `premoveTargets()` lit **10470**
+squares of which only **546 were actually playable: 5.2%**. Nineteen lit squares in twenty were a
+move the player would never be allowed to make.
+
+Under check the board stops being hypothetical — every legal answer is a move that can be played
+*right now* — so `premoveTargets()` filters the **first** link down to the real legal moves whenever
+`inPlayerCheck()`. Links deeper in the chain are still aimed at a board nobody can see yet and keep
+the raw geometry. `setPremove()` reads the same list, so an aim that does not answer the check is
+refused with the deny blip rather than queued and dropped later.
+
+**The rules, all of them in `GameController`:**
+
+- The window is `canPremove()` — mode `ai`, game running, and `!isHumanTurn()`. That deliberately
+  covers both halves of the wait: the search *and* the move animation, which is the half the
+  timings above do not show. `canQueueMore()` adds "and the chain is not full".
+- **Every link is aimed at a board that does not exist.** `projectedBoard()` replays the queue onto
+  a plain square map — pointedly *not* chess.js, which would refuse moves that are illegal today —
+  and `premoveTargets()`, `isPremovePromotion()` and `setPremove()` all read from it. Queue a knight
+  to `f3` and the next link is picked up **from `f3`**, while the wood is still standing on `g1`.
+  The map carries the castling rook along with the king, so a queued castle leaves the rook where
+  the plan puts it.
+- The crown for a queued promotion is chosen **when the move is placed**, not when it runs — a
+  picker opening halfway through the engine's reply would defeat the point of queueing.
+- `consumePremove()` runs from `commit()`, the moment the board is handed back, before
+  `maybeRunEngine()`. It takes **one** link: legal → played like any other move; not legal → the
+  whole chain is dropped and `premovefailed` carries `dropped`, the number of links that went with
+  it. Playing on would mean playing a plan against a position it was never drawn for.
+- It is called again at the end of *every* move, including a queued one that just ran. When the
+  machine is back on the clock it returns early and the rest of the chain simply keeps waiting —
+  the queue is not something the engine's turn is allowed to eat.
+- Depth lives in `setPremoveDepth()` (1–5). Shortening it truncates the queue on the spot rather
+  than letting the tail run.
+- Taking back: `popPremove()` drops the last link, `truncatePremoves(n)` keeps the first `n` (used
+  by tapping a link's own starting square), `clearPremove()` drops the lot.
+- A reply that **gives check** drops the whole chain on the spot, from `commit()` before the move is
+  even animated. `premovefailed` carries `reason: "check"` to separate it from `"illegal"`, which is
+  found later at the hand-back.
+- While the player is in check, `premoveTargets()` returns only the moves that answer it, so the
+  next chain cannot be built on squares nobody is allowed to use.
+- The queue is cleared by a new game, `stop()`, `undo()`, the end of the battle, and by switching
+  the feature off.
+
+**On the stone.** The whole premove vocabulary is cold pewter, deliberately outside the
+emerald/red/violet/azure palette every *played* move uses, and every mark in it is **broken** where
+a real move marker is solid and closed. An intention should not be able to be mistaken for the move
+happening in front of it.
+
+Within that family the ends of a queued move are dressed **differently**, because they are not
+equally worth reading:
+
+| | Kind | Colour | Marker | Spin |
+| --- | --- | --- | --- | --- |
+| Squares it could be aimed at | `premove` | `0x7d8ba3` | dashed ring, hollow | slow |
+| Every square the chain passes through | `queued` | `0x8ea0bd` | dashed ring, hollow | slow |
+| **Where the chain finishes** | `queuedTarget` | `0xe6edff` | bracketed **border** + centre pip | none |
+
+The first version gave both ends the same ring, and the player had to read the *pair* to work out
+which way the move went — on a board that also carries the last move, a check and a selection, two
+identical lights are a puzzle, not an answer. The origin does not need the help: a figure is
+standing on it. The destination is bare stone, so it takes the strong end — near-white steel at
+full marker opacity against the origin's dimmed `0.6`, with the beam and the x-ray bleed-through
+turned up to match.
+
+`premoveTargetTexture()` is a **frame**, not a reticle: four hard corner brackets with short stubs
+along the edges and the middle of each side left open, plus a small filled pip dead centre. Against
+the origin's hollow ring that pip is the one-glance answer to *which end is the destination*. And it
+does not rotate — `MARKER_SPIN.queuedTarget` is `0`, because a border that turns stops reading as a
+border; it is the one mark on the board that must stay square to the tile it claims.
+
+A chain is drawn as **one arrow, not a pile of them**: every waypoint — origins and the destinations
+of all but the last link — keeps the dim hollow ring, and only the square the plan finishes on gets
+the bright head. Five bright frames would be five competing answers to "where is this going?".
+
+The links are joined by `setPremoveLinks()`, thin additive threads pulled in at both ends so each
+starts and stops *inside* the marks rather than crossing them, breathing together between `0.16` and
+`0.32` opacity. One mesh per possible link is built up front (`MAX_PREMOVE_LINKS = 5`), so a chain
+growing mid-wait allocates nothing.
+
+**But those threads were symmetric, and a symmetric line has no direction.** They were
+`radialTexture()` stretched between two squares — identical read either way — so the only thing
+saying which way a link ran was the marks at its ends, and the marks are not always enough. Over
+**23923** generated three-link chains (each link aimed at the board the links before it leave
+behind, the same way `projectedBoard()` builds them):
+
+- **19.9%** of chains had two of their own threads **crossing** on the stone (7.3% of all link
+  pairs) — the exact moment a line has to speak for itself.
+- **5.1%** of links had *both* ends shared with another link, so neither end could be read as "the
+  one that starts it".
+
+So `premoveThreadTexture()` paints the thread as a **comet**: a `256×64` canvas drawn column by
+column, alpha ramping `0.06 → 1.0` on `u^1.7` and half-width `0.14 → 0.48` of the canvas height on
+`u^0.85`. The tail is a nearly dark hair at the square the plan *leaves*; the head is a bright wide
+burn into the square it *enters*. Two cues carrying the same message means it survives a crossing, a
+bloom pass, a dark hall and a colour-blind player — the ramp is deliberately eased rather than
+linear, because a straight ramp reads as "slightly brighter over there" instead of as a direction.
+
+No per-link texture work is needed to aim it: the mesh's local **+x is already the direction of
+travel** (`mesh.rotation.y = atan2(-dz, dx)` maps local +x onto `to - from`), and the gradient is
+painted along that same axis. Rotate the mesh, and the comet points itself.
+
+Each link now owns its **own material** — previously all five shared one — so a second gradient can
+ride on the first: the thread's tint lerps `THREAD_HEAD` `#e6edff` → `THREAD_TAIL` `#7f90ad` across
+`index / (count - 1)` (capped at `0.85` so the last link never goes fully cold). Within a thread the
+gradient says *which way this move runs*; across the chain the tint says *which move runs next* —
+the same story the numerals tell, told again in a channel that survives being glanced at. The
+breathing pulse still runs on all of them together, so the chain stays one object.
+
+**One arrow answers where the plan ends — not what happens second.** Three queued moves put three
+identical dim rings on the board joined by threads that cross one another from a low camera, and the
+only thing the player can reconstruct is the *set* of squares. So every link carries its ordinal:
+`premoveOrderTexture(n)` paints 1–5, and `setPremoveOrders()` hangs one over each link's
+**destination** — the square that link creates — read in the order the moves will run.
+
+- **A glyph, not a coin.** The dismiss disc is the only pressable thing in the premove language, so
+  a second filled disc would read as a second button. The numeral is a bare glyph over a soft dark
+  radial halo — a gradient with no rim, legible against pale marble, dark basalt and a figure's
+  shoulder alike, and plainly not a target.
+- **It does not bob.** The coin bobs because hanging *and moving* is what marks it out as a control.
+  The numerals hold still at `ORDER_LIFT = 0.28`, below the coin's `CANCEL_LIFT = 0.62`, so on the
+  last link the two stack — numeral under coin — instead of colliding.
+- **`depthTest: false` at `renderOrder = 11`**, under the coin's `12`. A chain runs *through* the
+  figures still standing on the board, so the mark that says "this happens third" cannot be the one
+  hidden behind a rook — and it must never draw over the button.
+- **Never shown for a lone queued move.** `setPremoveOrders()` ignores a single square: a "1" on its
+  own answers a question nobody asked, on a tile already carrying a ring, a frame, a thread and a
+  coin. The count appears from the second link on, when there is finally an order to read.
+- The head is full strength and the tail dims (`1 - index * 0.1`, floored at `0.62`), so the eye is
+  pulled to the move that runs next. Cut in the same engraved Cinzel serif as the rank and file
+  letters on the board's edge, so the count belongs to the hall instead of sitting on it like a HUD.
+
+The figures themselves never move — they are marked, not relocated — and the placing tap is the same
+wooden tick as a selection at half the volume, with no lift. Deeper in the chain the square the tap
+lands on is bare stone, so the tick is panned by where the *plan* puts the piece and weighted by the
+projected piece's kind; the selection glow goes on the square alone, because there is no wood there
+to light.
+
+**But that tick could not say the one thing that mattered.** Picking a figure up for a premove and
+actually queueing the move were the *same* dry knock, at `0.5` and `0.42` — a 1.6 dB difference, in
+the middle of an engine reply that is already walking, clashing and shouting. The ear could not tell
+"heard you" from "it is in the queue", and nothing at all said *which* link had just landed, which
+is exactly the thing a player queueing three deep without looking away needs to know.
+
+So the confirmation gets a voice of its own: `audio.premoveChime()`, a small struck bell under the
+knock rather than instead of it — one sine with a quiet octave over it (`0.28`), **12 ms of attack**
+so it swells instead of clicking, and a half-second tail. Peak level is `0.05`, a twentieth of full
+scale: it has to sit *under* the machine's move, which is the thing actually happening.
+
+It walks up a five-note **major pentatonic** (C5 D5 F5 G5 A5) with the link index. A ladder with no
+semitone in it means a chain built quickly is a phrase rather than a pile-up — three taps in two
+seconds resolve instead of clashing — and the rising pitch tells the player how deep the plan is
+without taking their eyes off the fight. The note is panned by where the plan **lands**, not where
+the wood is: the knock belongs to the figure, the note belongs to the mark that just appeared on the
+far square.
+
+A chain lost to a **check** is the one exception to the red beat: the king's square is already
+beating red under the check banner, and two reds at once is two messages for one event. It leaves
+with the deny sound and the tremor, and the board keeps the check to itself.
+
+**Taking it back had no button.** Four gestures already cancelled a queued move — tap the figure,
+tap the destination, `Esc`, or simply queue another — and not one of them was written anywhere the
+player could see it. On a phone two of the four (a key, and a hover-free "tap the mark you can
+barely tell apart") are worth nothing. So the queue carries its own dismiss control:
+`premoveCancelTexture()`, a small struck-cross coin hanging `0.62` above the **last** link's tile.
+
+- It is a **sprite**, so it faces the player from any orbit angle, and it is drawn with
+  `depthTest: false` at `renderOrder = 12`. A cancel button hidden behind the figure standing in
+  front of it is a cancel button that does not exist.
+- The disc covers only ~68% of its texture; the transparent margin is free hit area, so the coin
+  stays small on screen and still takes a thumb.
+- It **bobs** (±0.03 at 2.2 rad/s) and pops in on `easeOutBack`. Everything else in the premove
+  language lies flat on the stone — hanging in the air is what says *control*, not *marker*.
+- Cold it wears the queued pewter `0xd7e2f6`; under the pointer it warms to ember `0xff8f7a`, grows
+  16% and brightens, because this is the button that destroys something.
+- The pointer is tested against the coin **before** the board in both `onPointerMove` and
+  `onPointerUp` — it is drawn in front of everything, so the square behind it must not steal the
+  hover or the tap.
+- It follows the same modal rule as the x-ray reticles: `setOverlaysMuted()` takes it off screen
+  while a panel is up, since it too punches through them.
+
+It appears and disappears with the queue itself (`setPremoveCancel()` from `applyPremoveHighlight()`),
+so it is never on screen when there is nothing to take back — and it is the chain's **undo**, not its
+bin: one tap pops one link, and it hops back to the new end of the chain. `Esc` is the bin.
+
+The three cancel gestures now say three different things, which is the whole reason the chain is
+usable: the coin pops the **last** link, tapping a link's own starting square drops **that link and
+everything behind it** (they were aimed at a board that will now never happen), and `Esc` or a tap
+off the board drops **all of it**.
+
+When the reply kills the head of a chain, its two squares beat red once for 0.55 s with the deny
+blip and the rest vanishes with it; if more than one link went down, a short `tremor(0.09, 0.4)` is
+added, because a whole plan collapsing deserves more than the same beat as one move. No dialog: the
+player just watched the move that killed it.
+
+Settings carries the off switch (*Queue a move while the machine thinks*, on by default, remembered
+in `kg.premove`) and, under it, *Moves you can stack* — 1 / 3 / 5, remembered in `kg.premovedepth`,
+hidden entirely while queueing is off. Rules are covered by `src/core/premove.test.ts` (14 tests).
+
+### Clicking a square behind a figure
+
+The figures are life-size people standing on 1.02 m squares and the camera is low, so a
+destination is normally *behind* a body rather than beside one. Sampled on the opening position
+with the real framing and colliders: a knight's own two squares are **88% hidden** on a 1440×900
+window (61–67% on a 390×844 phone), and `a3` is 47% hidden by the pawn on `a2`.
+
+Every figure carries an invisible collider and the nearest hit wins, which is the right rule for
+*choosing* a figure and the wrong one for *playing a move*: only **11%** of the pixels inside `f3`
+resolved to `f3` — the other 89% hit the `f2` pawn in front, so the selection jumped to the pawn and
+the knight stayed put. That is the board appearing to ignore the player.
+
+`pickTarget()` now decides between the two with one rule: **a figure speaks for the ground it
+stands on, and no further.** While a piece is selected, if the pointer is inside a lit
+destination's own projected outline, that destination wins — unless the pointer is *also* inside
+the outline of the square the ray hit (its feet, its base, its own tile), which keeps
+tap-to-select, tap-to-deselect and tap-the-enemy-to-attack exactly as they were.
+
+The outline test needs no tolerance to tune: the board is a single plane, so its 64 outlines tile
+the screen with no gaps and no overlaps, and at most one can contain the pointer. Re-sampling the
+same cases: `f3` and `c3` go from 11% to **100%** clickable on desktop and 34% → 98% on the phone,
+`a3` from 49% to 100%, `e4` (never occluded) stays at 100%, and every figure remains 100%
+selectable over its own ground.
+
+Seeing the square is the other half. A marker that only exists on the stone is invisible under a
+body, so `board.ts` draws each destination reticle a second time with `depthTest: false`,
+additively, at `XRAY_OPACITY` (0.26–0.38 of full) — an occluded square reads as light bleeding
+through the figure. Locked to the marker's own scale and spin at 0.9×, so where nothing is in the
+way the two read as one mark rather than a double exposure.
+
+### The promotion picker
+
+A promoting pawn opens the only genuinely modal moment in the game, and it used to be the least
+readable thing on screen: four unlabelled sculpts at board depth. Sampled with the shipped framing,
+each candidate stood **103px tall on a 1440×900 window and 38px on a 390×844 phone**, with
+**32–37% (desktop) and 94–100% (phone)** of every silhouette overlapped by the army behind it. The
+sculpt cannot carry the choice on its own either — every officer here is royal-height and rook,
+bishop and queen differ only in what they hold, a few pixels of weapon at picker size.
+
+So the picker is staged as a modal. `buildPromotionPicker()` gives each candidate a plinth and a
+sprite **name plate** carrying the rank's crest, the rank spelled out and the key that picks it (the
+plate is the biggest click target of the four). `layoutPromotionPicker()` anchors the group to the
+**camera** rather than the board — a solved distance forward, `lookAt` the camera — so it reads the
+same at every framing and can never end up inside a rank of figures. The distance is solved from the
+lens so the grid fills `PROMOTION_FILL` (84%) of the binding axis, four across on a wide screen and a
+**2×2 grid** below `aspect 1.05`: the 38px phone figure becomes ~115px. The figure turns inside its
+own `spin` child so the idle rotation never swings the plate out of line, and a full-screen scrim is
+hung behind the group with the cinematic depth of field refocused onto the picker.
+
+**Depth-ignoring overlays have to stand down while it is up.** Rank crests (`renderOrder 40`) and the
+x-ray reticles (`renderOrder 9`) are drawn with `depthTest: false` on purpose, and that licence let
+them punch straight through the picker — the crests of the army behind landed on top of the
+candidates and their name plates. Render order alone cannot fix it: the plinths and sculpts are
+opaque, so three.js draws them in the opaque pass *before* every transparent sprite, whatever their
+`renderOrder`. The overlays leave instead — `setBoardOverlaysMuted()` calls `PieceView.setBadgeMuted()`
+and `Board.setOverlaysMuted()`, a **separate mute from the player's crest preference**, restored when
+the picker closes. Only the plate keeps `depthTest: false`, at `renderOrder 60`, so it is never cut
+by its own plinth.
+
+`Q` `R` `B` `N` (or `1`–`4`) answer from the keyboard: while the picker is open `GameShell`'s key
+handler routes everything into `choosePromotion()` and nothing else. Hover lifts the candidate,
+brightens its plinth and plate, and chirps once on entry rather than per frame.
+
+## Screen framing
+
+`scene/viewport.ts`. A perspective camera's `fov` is its **vertical** angle, and every shot in
+the engine was authored on a wide desktop window — so the narrower the screen, the less of the
+board's *width* fits in frame. Pulling straight back is not the answer either: the colonnade
+stands at radius 12.5, so a shot dragged out past it puts the hall in front of the board.
+
+`frameShot()` therefore solves each authored shot for the live viewport: it works out the
+distance and lens that fit the board's reach on the narrow axis, then takes the extra distance
+as **height** (`groundedPhi`) so the camera climbs over the colonnade. A phone in portrait ends
+up at 68° / radius 14.5 / ground reach 10.6; a desktop window keeps its authored 46° shot
+untouched.
+
+- `confineCamera()` runs every frame and converts any ground reach past radius 11 into height,
+  because orbit controls can only cap angle and distance independently. The intro fly-in is
+  exempt — it comes in from outside the walls on purpose.
+- The showcase follow rig does **not** rely on that net. `solveFollowEye()` cuts the rig's ground
+  reach to the positive root of `|focus + reach · heading| = 10.6` *before* the exponential
+  smoothing, spending `FOLLOW_GIVE` (18%) of the distance before it steepens `phi`. Correcting the
+  camera after the lerp instead put a hard projection inside the loop: replaying the real frame
+  loop against a march down the near file, the clamp fired on 354/360 frames and spiked the
+  per-frame jerk to `5.3e-2` world units (0.5% of screen height) against `8.6e-3` for a clean
+  path — the showcase shudder. Solving up front leaves the clamp dormant while following.
+- `FOLLOW_LEAN` (0.72) holds the rig a fraction of the way from the board centre to the figure, so
+  the eye covers part of the board rather than all of it — less travel per move, and the reach
+  rarely runs out in the first place.
+- `orbitLimits()` gives handheld screens a steeper elevation cap, a longer minimum pinch
+  distance, a slower rotate speed and a fatter tap tolerance.
+- `lensFov` holds the framing currently in force; battle-beat punch-ins are scaled against it
+  (`lensPunch`) and read it live, so a rotation mid-fight can never restore the wrong lens.
+- The tactical map is solved through the same path, so its overhead lens opens up in portrait
+  instead of cropping the outer files.
+- `readViewport()` decides "handheld" from a coarse pointer on a hand-sized screen — a capability
+  test, not a user-agent string.
+
+## Overlay
+
+`GameShell.tsx` owns the phases (loading → menu → playing), the settings, attract mode and the
+keyboard shortcuts; `Hud.tsx` is everything on screen during a game. The board keeps the
+viewport: the turn slate (with the field tally under it) and the icon rail sit in the top corners,
+the right flank carries the rail (`.mc-side-rail`) with the spoils above and the **move record**
+below it, desktop and tablet only,
+phones get 34px buttons and drop the two redundant icons (flip lives in the camera menu,
+fullscreen is ignored by iOS),
+the record folds behind the corner sigil (`H`) there, and the showcase transport is a slim
+bottom-right rail that folds down to a single icon.
+
+**Where the ledger is mounted.** Exactly one `MoveLedger` is alive at a time: docked in the flank
+rail at `≥ 1024px`, folded into the bottom-left chronicle panel below it. The breakpoint is read in
+JS (`useRoomForRail` in `Hud.tsx`), not with `lg:hidden` on two copies — two mounted ledgers would
+both drive the board's move preview and both fight over the scroll pin. The rail is anchored top
+**and** bottom so the record grows into the height the screen has left, stopping clear of the
+bottom-right transport.
+
+**Safe areas.** `index.html` opts into `viewport-fit=cover` so the hall fills a notched screen —
+and so `env(safe-area-inset-*)` reports real pixels at all (without it iOS returns `0px` for every
+inset, which is why the turn slate used to sit under the Dynamic Island). `medieval.css` turns
+those into `--mc-safe-top/right/bottom/left`, and each edge-anchored surface spends only the inset
+for the edge it is pinned to: `.mc-hud-top` (top + both flanks, since a landscape cutout moves to
+the side), `.mc-hud-corner` (bottom + left), `.mc-demo-dock`, `.mc-cinema-restore`, `.mc-fps`,
+`.mc-side-rail`, and `.mc-modal-pad` for the full-screen panels — whose dimmed backdrop stays at
+`inset-0` on purpose, or the hall would show through beside the cutout. Base padding still steps
+with the breakpoint (`--mc-edge`: 0.5 → 0.75 → 1 rem); the inset is added to it. Every variable is
+`0px` on a screen without a cutout, so nothing else changes.
+
+**The menu's two standing actions** (`.mc-actions`) are capped near their labels rather than
+stretched across the panel. They used to be `w-full`, which on the `max-w-md` slate is 400px — and
+measuring the strings against the real Cinzel advance widths, the crown plus "TAKE THE FIELD" is
+156px of ink and the cog plus "SETTINGS" only 93px, so the labels filled **39%** and **23%** of
+their buttons and floated in a quarter-metre of empty gold. They now sit on **one row**, a
+`grid-template-columns: 1fr 1fr` capped at `max-width: 26rem` and centred: half of that less the gap
+is 200px, against 156px of ink for the widest label. The columns are a strict `1fr 1fr` rather than
+`auto` — sized to its own label the settings button would be a little over half the width of the
+primary, and hierarchy here is carried by type size and weight, **not** width, because two unequal
+halves read as two unrelated controls rather than a primary and its secondary. `clamp()` on padding,
+gap and type holds the ratio from a phone to a desktop, and `min-height: 2.75rem` keeps the 44px
+touch target once the padding tightens. Under `400px` of viewport width the grid collapses back to a
+single `16rem` column, the point at which the labels can no longer hold one line each.
+
+**Field tally** (`.mc-tally`, `FieldTally` in `Hud.tsx`). One row per army under the turn slate:
+crest, figures **lost**, time **on the field**, with the battle's total in the header. The row for
+the army on the move is lit — full opacity, a wash and an inset hairline in its own azure/ember — so
+the panel shows whose meter runs without another label, and a fresh burial swells and flares its
+loss count (`mc-tally-toll`). The panel is `pointer-events-none`: it is read, never touched, so taps
+in that corner still reach the board.
+
+Elapsed time is **not** the countdown. `ClockState` runs down and only exists when a clock was
+chosen; `ElapsedState` always accumulates, so an untimed duel still reports per-side time.
+`GameController.syncElapsed()` charges wall time to whoever is on the move and re-points the meter
+on every event that changes who is thinking (move, pause, undo, game over), so a paused showcase
+charges nobody. `FieldTally` reads it live via `controller.getElapsed()` on its own 500 ms interval
+instead of off the snapshot — the core publishes only on real events, and a passing second must not
+re-render the whole overlay.
+
+`Tooltip.tsx` explains the icon-only controls — name, one sentence, and a key cap when there is a
+shortcut *and* `useHasKeyboard()` says there are keys. It opens after 110 ms, then instantly for the rest of a sweep along the rail, aligns to
+whichever screen edge keeps it visible, flashes for 1.8 s on a touch press, and closes on Escape,
+blur or scroll. It renders inside its anchor rather than a body portal so it survives fullscreen.
+
+Nothing on this layer is raised by the engine any more. The marksman's rifle shot used to close a
+full-screen sight picture over the interface — a dark tube, a brass reticle, a rolled hand tremor,
+a recoil that threw the picture off the mark (`SceneCallbacks.onScope` → `ScopeOverlay.tsx`,
+`.mc-scope`). It is gone, along with the 8.5° lens punch-in it was paced against: the shot is now
+watched in the hall like every other kill, and what sells it is the man dropping onto one knee in
+frame rather than an effect wrapped around him.
+
+## Architecture
+
+Rendering is fully decoupled from the rules: the chess core emits events and the scene
+subscribes to them. Nothing in `src/core` imports three.js.
+
+```
+src/
+  core/            chess state, no rendering
+    gameController.ts  owns chess.js, clocks, undo, AI turns, snapshots
+    types.ts           shared game types (MoveEvent, GameSnapshot, …)
+    emitter.ts         tiny typed event emitter
+  ai/
+    engine.worker.ts   negamax + alpha-beta + quiescence + iterative deepening
+    aiClient.ts        main-thread handle, cancels stale searches
+  scene/             three.js only
+    sceneEngine.ts     renderer, camera, interaction, marching, combat choreography
+    environment.ts     hall, lighting, torches, particles, PMREM environment
+    arena.ts           the seven battleground looks
+    battlefield.ts     siege props, camps, fires, birds
+    jungle.ts          canopy, palms, vines, pollen for the Sun Temple
+    dressing.ts        groves, rock, monoliths, water and weather per map
+    board.ts           tiles, base, engraved labels, highlight pool
+    pieces.ts          rigged GLB loading, skeletal clips, faction materials, mixers
+    weapons.ts         arms per rank: primitives, loadouts, hand/bone mounting
+    armoury.ts         fits the generated Napoleonic weapons into the prop frame
+    gltfQueue.ts       the one download window every GLB fetch shares
+    rankBadges.ts      floating heraldic crests + flat map tokens
+    effects.ts         particle bursts, flashes, dissolve, camera shake and rumble
+    alarm.ts           the red lamp that stands over a king in check
+    strikes.ts         per-rank blow visuals (slash arc, ground wave, pillar)
+    spells.ts          fireball orbs, per-army fire, the shared light pool
+    gunfire.ts         muzzle flashes, rounds in flight, powder smoke banks
+    ammunition.ts      the four rounds: pistol/musket ball, Minié bullet, iron round shot
+    tracer.ts          the short 3D streak swept along the path a round actually flew
+    postfx.ts          EffectComposer pipeline (bloom, SSAO, DOF, grade, SMAA, clarity)
+    textures.ts        procedural marble, basalt, bronze, cloth
+    quality.ts         graphics presets + auto-detection
+    viewport.ts        solves the framing (distance, elevation, lens) for the live screen
+    tween.ts           promise-based tween engine
+  ui/                plain React + CSS overlay
+    GameShell.tsx      phases, settings, attract mode, shortcuts
+    Hud.tsx            top bar, field tally, spoils, chronicle sigil, showcase rail
+    Tooltip.tsx        themed tooltip for the icon-only controls
+    MainMenu.tsx / MoveLedger.tsx / SettingsPanel.tsx / GameOverModal.tsx / Heraldry.tsx
+    medieval.css       the whole overlay's look
+  audio/             Web Audio mixer, one score per battleground plus layered stems
+  assets/generated.ts  army skins (sculpts, clips, arms, voices per civilisation) + audio URLs
+```
+
+### Move flow
+
+1. The player (or the worker) produces a move → `GameController.tryMove`.
+2. chess.js validates it and the controller builds a `MoveEvent` (captures, castling
+   rook trip, en passant square, promotion, check flags).
+3. The controller awaits the animator the scene registered, so the AI never moves while
+   a figure is still gliding.
+4. React re-renders from the immutable snapshot published after every change.
+
+### The computer opponent
+
+- **Easy** — random legal move, prefers captures, always takes a mate in one.
+- **Medium** — depth 3 negamax with alpha-beta, material + piece-square tables, 0.7s budget.
+- **Hard** — depth 5 iterative deepening with alpha-beta, MVV-LVA ordering and quiescence
+  on captures, 3.2s budget.
+
+All searches run in `engine.worker.ts`, so the render loop never blocks.
+
+## Graphics presets
+
+| Preset | Post-processing | Shadows | Particles |
+| --- | --- | --- | --- |
+| Low | none (direct render) | off | none |
+| Medium | bloom, grade, SMAA | 1024 | light |
+| High | + depth of field in cinematics | 2048 | full |
+| Ultra | + SSAO | 4096 | dense |
+
+The preset is auto-detected on first load from the GPU string, core count and memory, and
+the engine steps down once automatically if the measured frame rate stays under 40 FPS.
+Pixel ratio is capped at 2 (1 on Low), and WebGL context loss shows a reload prompt.
+
+### Black-screen recovery
+
+Drivers that render an all-black scene under a working interface (Mesa's software rasterisers on
+Linux above all) are handled in three places:
+
+- `scene/diagnostics.ts` — `probeGpu` names the driver, `reflectionProbeWorks` renders a white
+  sphere lit only by the freshly built PMREM probe into an 8×8 buffer and reads it back. Black or
+  `NaN` means the probe is unusable, so `SceneEngine.applyEnvironment` drops it and turns up an
+  ambient skylight of the same colour instead.
+- `SceneEngine.guardAgainstBlackFrames` — samples the frame at five points (centre plus quadrants)
+  five times over the first eight seconds. All five points must read black before anything is
+  dropped; each failed sample peels off one more layer: composer → reflection probe → safe mode.
+- **Settings → Picture** — a brightness slider (exposure ×0.6–1.8) and a `Safe rendering` toggle
+  (`SceneEngine.setSafeMode`: no composer, no probe, no shadow maps, +20% exposure). Both are
+  persisted in `localStorage` under `kg.render`, and `?safe=1` forces safe rendering from boot.
+
+An AI vs AI duel adds a **clarity grade** on top of the preset (`Postfx.setClarity`): no depth of
+field, grain ×0.3, vignette ×0.5 and bloom ×0.62 at a higher threshold, because a duel that is
+watched rather than played needs the sculpts and the squares to read.
+
+### The verdict card
+
+`GameOverModal.tsx` closes every battle, an AI vs AI duel included. The old render condition was
+`… && !snapshot.demo?.autoRematch`, so a looping AI vs AI session — the mode most likely to be watched —
+never named a winner: the board just reset. It now takes an optional `ShowcaseOutcome` and adapts:
+
+- **Framing** — duel number, winning crest, how the game ended, `Squire/Knight/Warlord` for each
+  engine, the move count, the PGN, then **Another duel** / **Great hall**.
+- **A thin backdrop** — `bg-black/35` and no blur for AI vs AI (a played game keeps `bg-black/65`
+  plus blur). When the duel is watched the final position is the picture, so the card must not bury it.
+- **It waits for the cinematic** — `SHOWCASE_VERDICT_DELAY_MS` (2.2 s) in `GameShell.tsx` holds the
+  card back while `playEndCinematic` dollies onto the fallen king (~2.4 s).
+- **The loop, made visible** — with auto-rematch armed, `NextDuelCountdown` shows a
+  **NEXT DUEL IN _n_s** bar plus **HOLD** (`setDemoAutoRematch(false)`). It polls
+  `controller.getDemoRematchRemaining()` on its **own 100 ms interval**, the same reason
+  `FieldTally` does: the core publishes on real events and a ticking second must not re-render the
+  overlay. `DEMO_REMATCH_DELAY_MS` went 6.5 s → **9 s** so the result can be read before the reset.
+- **Another duel** calls `controller.restartDemo()` when `mode === "demo"`. Routing it through
+  `startMatch` (as `handleRematch` used to for every mode) mapped `demo` → `ai`, silently turning a
+  watched duel into a game against the computer and resetting the duel counter.
+
+## Armies
+
+Three army skins, chosen per side in **Settings → Armies** and remembered in `localStorage`
+under `kg.armies`:
+
+| Id | Army | Arms (`ArsenalId`) |
+| --- | --- | --- |
+| `ivory` | Ivory Kingdom — King, Queen, Mage, Knight, Guardian, Footman | `kingdom` |
+| `sun` | Sun Empire — Emperor, Priestess, Serpent Priest, Jaguar Warrior, Temple Guardian, Eagle Warrior | `sun` |
+| `empire` | Grande Armée — Napoléon, Imperial Commander (flintlock + Marengo sword), Marshal-Tirailleur, Cuirassier, Artillery Guard, Line Infantry | `empire` — **generated sculpts**, see [Sculpted arms](#sculpted-arms-the-napoleonic-weapons) |
+
+One skin (`ARMY_SKINS` in `src/assets/generated.ts`) carries its own six sculpts, five or six
+clips per rank, weapon family (`LOADOUT` in `weapons.ts`), rank names and its own six death
+cries (`DEATH_CRIES`) — no skin borrows another's voices, and the Grande Armée's are gunshot
+reactions (punched-out air, then the voice) rather than melee cries.
+`SceneEngine.setArmySkins` runs the swap in the background: it waits for any move animation to
+finish, marks the factory stale and rebuilds (taking the old figures down before their shared
+geometry is freed), reloads the rosters, stands the new army up and repoints the mixer's voices.
+With the same skin on both sides only the skin's `native` faction keeps its painted textures;
+the other side falls through `applyFactionLook()` and is tinted into dark livery.
+
+### Telling the two armies apart
+
+The sculpt cannot be trusted to answer "whose is that?". Mirror matches render the *same* sculpt
+for both sides, and two *different* armies both keep their own painted textures (`ownLivery`), so
+at camera distance in a torchlit hall thirty-two dark figures read as one crowd. The side is
+therefore stated in **three** independent channels, tuned so no single one has to carry it
+(`FACTION_RING`, `FACTION_RING_SHAPE`, `FACTION_RIM` in `pieces.ts`):
+
+| Channel | Near side (`w`) | Far side (`b`) | Why |
+| --- | --- | --- | --- |
+| Band on the tile | azure `0x5fb0ff`, **plain double band** | ember `0xff5230`, **spiked sun collar** | Read from any camera height; the *shape* differs too, so it survives colour blindness. `factionRingTexture()` paints one white canvas per shape and the material tints it |
+| Rim light on the silhouette | azure `0x74baff` | ember `0xff6134` | Separates a figure from the piece behind it, not just from the ground. A fresnel term injected next to the dissolve (`installDissolve()`) and added right after `opaque_fragment`, so it is tone-mapped with the frame instead of sitting on it as a decal. Weapons carry it too — the silhouette includes the musket |
+| Rank crest | azure field, gothic heater shield | ember field, stepped sun disc | The plates used to be near-black on both sides with only their bezel metal differing: at badge size that is two dark lozenges |
+
+The band is **painted, not added** (`NormalBlending`, `toneMapped: false`, resting opacity
+`RING_REST` = 0.3). The old additive glow at 0.16 vanished into a lit marble square, which is
+most of the board. Selection, hover, the check alarm and the landing flare still push above the
+resting level, clamped at 1.
+
+**Three channels means each one runs quiet.** The first pass at this ran all three loud at once
+and the board went blue and orange: the mark stopped identifying the figures and started hiding
+them. Both offenders were painting the *sculpt*, not the space around it:
+
+- **The rim reached inside the silhouette.** It is added to the shaded colour, so its fresnel
+  exponent decides how far in it travels. At `2.7` the term was still strong a long way from the
+  contour — enough to flatten braid, facings and musket furniture into one hue. `RIM_FALLOFF` is
+  now `4.6`, confining it to the grazing few degrees that actually do the separating, which let
+  `RIM_STRENGTH` drop `0.62 → 0.26` and still read against the darkest map.
+- **The band's floor wash bounced up the legs.** The widest, brightest part of the mark sat
+  directly beneath the figure (`0.34` alpha out to `0.46` of the tile). Now `0.12` out to `0.4`,
+  with the bleed halo behind the crisp line narrowed (`0.11 → 0.07` wide, `0.24 → 0.14` alpha) so
+  the bloom pass has less to grab. The *shape* of the band was always the signal; brightness only
+  has to make the shape visible.
+
+The crests were left alone. A sprite above the crown covers no part of the model, so it is the one
+channel that can afford to be loud — which is why the other two can afford not to be.
+
+**One army wearing both sides is loaded once.** Only the `native` faction's six rosters are
+downloaded; the other side renders the *same* `Template` objects, sharing one `scene` and — the
+part that matters — one `clips` object, so a clip fetched for either side is bound to both.
+
+**Musters are serialised** (`PieceFactory.load` / `reload` both queue through `muster()`), and a
+muster whose armies are already standing is a no-op. Two of them writing into the roster map at
+once is what used to break exactly this case: the shell records the armies remembered from last
+visit and *then* calls `load()`, so any non-default choice kicked off a swap and the first
+download simultaneously. Both runs filled `templates`, leaving the borrowed roster pointing at
+run A's sculpt while the roster it borrowed from had been replaced by run B's. The two stopped
+sharing a `clips` object, and a borrowed roster carried no clip URLs of its own — so that side
+could never fetch a stride, a strike or a death again. It slid across the board and killed
+without swinging, while the other side animated perfectly. Two things close it for good:
+`setSkins()` reports "no reload needed" until something has actually been mustered (the pending
+load reads the choice itself), and a borrowed roster is now handed the lender's clip URLs under
+its own key as well, so it can always name its own clips.
+
+## Character animation
+
+Every figure is a rigged (skinned) character with up to six skeletal clips, listed per kind in
+its army's `animated` roster (`ARMY_SKINS`, `src/assets/generated.ts`):
+
+| Clip | When it plays |
+| --- | --- |
+| `idle` | Looping combat stance, desynced per figure so the army does not breathe in lockstep. The Grande Armée's marshal stands at the ready with the rifle lowered — he used to wait out the *whole game* on one knee, which read as a man permanently in cover; the kneel is worth something only as the thing he does to take a shot |
+| `walk` | Looping in-place stride, retimed to the cadence of the move under way. The stride length inside the clip is **measured** (`gaitCycle()`): the generator returns anything from one cycle (`spear-walk`, 1.13 s) to three (`casual-walk`, 4.23 s). It must still be a walk — a sprint cycle stretched over one square judders instead of marching, which is why the line infantry advances on the musket-across-the-body walk rather than the rifle charge on the same rig |
+| `run` | Looping in-place run — the knight charging through its leap (knights only) |
+| `attack` | One-shot strike the moment the attacker lands a capture (sparks, shake and clash sound are timed to the hit frame). For the queen and the mage the same clip is the incantation, and its hit frame releases the fire — except under the `empire` arsenal, where the commander draws and shoots instead; for the Grande Armée's **standing** gunpowder ranks it is the **firing drill**, played at its own readable length (`GUNS[kind].drill`) with the hit frame on the shot. The marshal-tirailleur carries **no** `attack` at all — he fires out of his kneeling `aim` (see Ranged captures) |
+| `death` | One-shot fall played by the captured figure before it dissolves into dust |
+| `reload` | One-shot drill run after a shot (powder, ball, ramrod). Only the Grande Armée carries one — the marshal's is a kneeling reload served from the knee he fired from, the rook's is at the muzzle, the king's and the commander's are done standing |
+| `rise` | One-shot stance change between one knee and both feet, authored kneeling→standing and played in **both** directions: reversed by `playKneel()` to go down onto the knee, forwards by `playRise()` to come back up. Only the marshal has one. Measured on the hips it opens at 48 units and stands at 92 by the 70% mark, so `RISE_SPAN` runs both directions over that part and never shows the still tail |
+| `aim` | Looping sight picture held *before* — and, for a kneeling gunner, **through** — the shot: the weapon comes up and stays on the body while the shooter settles (`PieceView.playAim()`). Napoléon (pistol levelled), the Imperial Commander, the line infantry (musket into the shoulder) and the marshal (on one knee, rifle up and scanning) all carry one; only the battery has none — laying the gun already is its aim. `setAimDrift()` slows the lateral scan almost to a stop once the shot is away, so a man who has fired watches what he hit instead of going back to sweeping the board |
+
+How it is wired (`src/scene/pieces.ts`):
+
+- The **rigged** GLB is the visual — the plain GLB has no skeleton, so clips bound to it do
+  nothing. Each animation GLB contributes one clip, renamed to `idle` / `walk` / `run` /
+  `attack` / `death`.
+- Every instance is cloned with `SkeletonUtils.clone` (never `Object3D.clone`) and gets its
+  own `AnimationMixer`; one-shots use `LoopOnce` + `clampWhenFinished`, and the strike
+  crossfades back to the stance on the mixer's `finished` event.
+- Clip root motion is stripped on X/Z so a figure never walks off its square; the death clip
+  keeps its motion so the fall reads properly. Locomotion clips are **in-place** cycles — board
+  travel belongs to the container tween, so a clip carrying root translation would double it.
+- **The preset governs the stance, not animation.** `idleAnimations` (off on **Low**) is the
+  ambient breath — thirty-two skeletons ticked every frame — and without it a figure holds the
+  first frame of its stance. The **stride, strike and death play on every preset**; a march is
+  one mixer for a second or two. Only the flat tactical map and a rig-less sculpt fall back to a
+  slide. `returnToStance()` hands the body back honouring the preset, so a `Low` figure does not
+  start breathing once it has finished a move.
+- One `characterAnimations` flag used to gate the stance *and* the walk cycle, and
+  `detectQualityPreset()` puts touch devices on **Low** — so every phone slid statues while the
+  same figures swung and died in full animation. `navigator.deviceMemory` is Chromium-only, so
+  iOS reported nothing, the unknown was defaulted to 4 GiB and tested against `>= 6`: no iPhone
+  ever cleared it. Unknown memory is no longer read as a small device, and a current phone opens
+  on **Medium**.
+- **Clips load in waves.** Over seventy GLBs fired at once made the browser drop requests
+  (`TypeError: Failed to fetch`), which cost figures their strike — a capture then looked like a
+  piece dying untouched. The rig plus its `idle` load first, then `PieceFactory.warmClips()`
+  fetches `walk` → `run` → `attack` → `death` → `reload` → `aim` two downloads wide and binds
+  each clip onto the figures already on the board (`PieceView.installClip`). **Strides go first**
+  because the opening move is made seconds after the board stands up.
+- **Every beat arms itself.** A capture calls `ensureClip` for the attacker's strike and the
+  victim's death (waiting up to 2.4 s rather than skipping the beat), and `glide()` calls
+  `armStride()` for the walk or run it is about to play (up to 0.6 s). Without the latter the
+  first move of a game was staged before its stride had landed and the figure slid on its
+  stance — which read as that rank having lost its walk animation.
+- **A downloaded clip lands on every roster that wanted it.** Downloads are deduplicated by URL,
+  and `bindClip()` then binds the result onto each roster whose clip URL matches — not just the
+  one that happened to ask first — and reports them all to `installClip`. A clip URL that comes
+  back dead is written off after `MAX_CLIP_ATTEMPTS` requests (ten network attempts): the
+  Emperor's rig has **no** reload take on the server, and chasing it charged every one of his
+  shots a full round of failed fetches before the beat could continue. He now simply lowers the
+  pistol — regenerate a reload on that rig to give him the drill back.
+- With no strike clip at all, `SceneEngine.lunge()` swings by hand (wind-up, twist, lean back,
+  blow over the top); the tilt is held by `PieceView.setStrikeTilt()` so the mixer cannot wipe it.
+
+### Marching and footsteps
+
+`SceneEngine.glide()` runs one stride clock per move. `GAITS[kind]` declares steps per square,
+cadence, boot timbre and loudness, so `steps = tiles × stepsPerTile` and the duration is
+`steps / cadence` — a longer move takes **more steps**, not a faster slide.
+`PieceView.startMarch(clip, stepRate)` retimes the walk cycle so one gait cycle is exactly two
+footfalls at that rate — measuring that cycle with `gaitCycle()`, which autocorrelates a leg
+bone's swing and caches the answer per clip. Assuming the whole clip was one cycle is what cost
+the heavy ranks their march: `casual-walk-inplace` (king, queen, tower, battery) is 4.23 s of
+three cycles, so the time scale asked for saturated its ceiling and the legs blurred at one fixed
+rate whatever the move — the tower read as sliding with no animation. `strideEasing()` gives a
+push-off, a cruise and a settle (a fully eased curve would leave the feet skating), every whole
+step fires `audio.footstep()` plus a grit puff at the contact point, and the battery's hauled gun
+pitches on its axle once per footfall (`rumbleTrain()`) instead of gliding along beside the crew. The four timbres (`scuff` / `leather` / `plate` / `regal`) are
+synthesised in `src/audio/audioManager.ts` — body thump, band-passed sole transient, metallic
+afterring — panned by screen position and pitch-jittered.
+
+### Strike weight by rank
+
+The hand-to-hand beat is one piece of choreography, but its weight comes from `STRIKES[kind]`
+in `src/scene/sceneEngine.ts`. The pawn's line is the original beat and is unchanged; each rank
+above it adds something: the knight a crescent of steel and a dust wake on the charge, the rook a
+wave rolling across the stone with a low slam and a long aftershock, the king a column of light
+dropped on the condemned, a bell, and a gold arc plus gold ground wave. Ranged captures follow
+the same idea — `MAGE_SPELL` throws one bolt, `QUEEN_SPELL` gathers longer and throws a volley of
+three that leaves fire burning on the square. Visuals live in `src/scene/strikes.ts`, and the
+swing / slam / bell voices are synthesised in the mixer.
+
+### Taking the square
+
+All three battle beats end the same way: the body is cleared and the victor marches onto the
+square. That arrival used to get the same generic set-down clack as a quiet move, over a
+*softer* landing than usual — so the moment that actually wins a game of chess was the quietest
+thing in the fight. `claimSquare()` fires once from `runMove()` after `landOn()`, which covers
+every path including captures made with the cinematics off or on the flat tactical map:
+
+- **`audio.conquest()`** — a boot on the stone, then a brass motif rising a perfect fifth, then
+  high inharmonic partials left ringing. Notes are scooped into from under pitch through a
+  filter that opens on the attack (that is what makes it brass, not a sawtooth), rooted on G3 —
+  the same fundamental as the judgement bell. Synthesised, so it lands on the frame regardless
+  of the network.
+- **`spawnConquestClaim()`** — the victor's colour drawn **inward**: a wide loop closing tight
+  around the tile, brightening as it converges, sealing into the army's sunburst mark. Every
+  other ring in the game travels outward, so the reversed motion is the signature.
+- **`drawUp()`** — the shoulders come back off the blow and spring level on `outElastic`, driven
+  off the runtime node so unrigged sculpts get it too. A lean, not a victory pose: it has to
+  finish inside the pause before the reply.
+
+All of it scales off `CONQUEST_WEIGHT[victim.kind]` — the only weight on the board that belongs
+to the victim. Heavier captures drop the root by up to half an octave, add an octave as a third
+note, hold the ring closed longer and throw more chips, so a queen falling is audibly not a pawn
+trade.
+
+### Ranged captures
+
+`RANGED_KINDS` routes the queen (`q`) and the mage (`b`) to `playSpellCinematic()`: both sides turn
+to face each other, fire gathers at the staff crystal through the strike clip's wind-up, the bolt
+flies to the target's chest and breaks open — and the victim **dies and is cleared away before the
+caster takes a single step** onto the square.
+
+The Grande Armée's ranks fight the same distance with powder instead (`playGunCinematic()`). That
+beat is **aim → drill → trigger → shot**: the `aim` clip is held for `GUNS[kind].aim` seconds so the barrel is
+seen coming up on the body, then the firing clip runs at its own length with the report on its own
+frame (`GUNS[kind].drill = { seconds, impact }`). Every barrel is framed the same way — a modest lens
+punch-in held over the beat — since the rifle's sight-picture overlay and its extra zoom were removed.
+
+**One stance per shot** (`GUNS[kind].stance`). The profile states whether the shot is taken standing or
+from one knee, and that decides *which pose the gun is fired from*:
+
+- **Standing gunners** play their firing drill — those clips start and end on their feet, so the drill
+  agrees with the stance around it.
+- **The marshal-tirailleur kneels, and gets no firing clip.** His rig's shooting take is
+  `Female_Crouch_Pick_Gun_Point_Forward`, whose name is a trap: measured on the hips it opens at 92
+  units (standing), dips to 68 and is back at 93 by the 70% mark, so its authored ignition frame at
+  0.6 lands with the man **upright**. Run between a kneeling `aim` (hips 48) and a kneeling `reload`
+  (42) it stood him up to fire and dropped him again — three stance flips inside one shot, which is
+  what read as bobbing up and down. His beat is now **drop → hold → fire → die → reload → rise**:
+  `playKneel()` puts him down over `stance.drop` (0.85 s, the rise clip reversed, so the knee plants
+  instead of the body sinking), the sights are held for `aim` (0.55 s), the trigger and report are
+  timed off `drill` **out of that held aim**, the recoil rocks him where he kneels, the victim dies,
+  the reload is served from the same knee, and only then does `riseToFeet()` bring him up
+  (`playRise()`, ~0.95 s, with the boot heard taking his weight) before he marches onto the square.
+  From the knee going down to the body being cleared, his stance never changes.
+- `reload()` hands only a **standing** gunner back to his stance; standing a kneeling one up there
+  would drop a stance change into the middle of the one beat meant to hold still.
+
+**Each barrel fires its own round** (`SHOT_MODELS` for the sculpts, `src/scene/ammunition.ts` for the
+procedural fallbacks, chosen by `GUNS[kind].ammo`). Every round is a real mesh normalised
+nose-along-travel, one unit nose-to-base, so a shot only scales it by its gauge:
+
+| Round | Barrel | Built from | In flight |
+| --- | --- | --- | --- |
+| `pistolBall` | king, commander | cast lead sphere, mould seam + sprue stub | tumbles, wanders ~0.9 calibres |
+| `musketBall` | line infantry, cuirassier | the same ball, fatter and dented by the ramrod | tumbles, wanders ~1.6 calibres |
+| `minieBullet` | marshal-tirailleur | lathed ogive, three grease grooves, hollow base skirt | spins about its nose, dead straight |
+| `roundShot` | battery | pitted sand-cast iron ball with casting seam | glows out of the bore and cools; passes through |
+
+Two materials serve the fallbacks: cast lead (`0xb4bac2`, `metalness 0.62`, `roughness 0.44`) and
+sand-cast iron (`0x3b3936`) with an emissive animated per shot. Both stay *off* full mirror metal with
+a floor of self-lit grey, and `legible()` applies the same treatment to every sculpt's own materials
+on load — a near-mirror sphere a few pixels wide has nothing to reflect in a dark hall and renders as
+a black dot. **No round is a tracer**: black powder never fired one.
+
+**Why a shot is visible at all.** True to scale a ball is one pixel for one frame, so three dials are
+deliberately cinematic while the physics stays honest: `AMMUNITION[kind].gauge` (1.7–2.6× the bore)
+for how large the round is *drawn*; `GUNS[kind].speed` (0.082–0.125 s per tile, clamped to
+0.17–0.58 s) for a flight the eye can follow; and a **nose blur** — `tracerTexture()` on a tapered
+cone laid along the travel vector (not billboarded), lengthening with the round's actual pace and
+opening from a stub over the first frames, now held to half its authored length (`NOSE_BLUR`). A small
+glint sprite carries torchlight on the metal, and the round spawns clear of the bore rather than
+inside its own muzzle flash. The orange glow, the borrowed light and the dragged-along wake still
+belong to the iron alone.
+
+**The path itself is drawn** (`src/scene/tracer.ts`). Everything above rides *with* the round, so none
+of it said where the shot had been. `TracerStreak` sweeps a short 3D ribbon along the round's own
+flown samples — real geometry, so it holds up from any camera angle, is occluded like an object, and
+**bends where a smoothbore ball wandered**. Section is a three-bladed tube (12–26 rings by preset via
+`trailRings()`), in two layers on one spine: a wide faint sheath of disturbed air and a thin bright
+filament that only lights the calibres right behind the metal. Radius tapers on `u^0.55` and
+brightness on `u^falloff`, so the tail pinches to a needle; the arc is held to `StreakLook.span`
+(4.2–9 ball diameters ≈ one square, never muzzle-to-target, or it reads as a laser) by *sliding* the
+oldest sample along its segment rather than dropping it, which is what keeps the tail from stuttering
+backwards. On impact `releaseStreak()` fades it over 0.16 s under the debris instead of cutting it.
+
+**The flash is sized off the round it launches.** `GUNS[kind].flare` is a *ratio* (4.4–6.0), not a
+width: `muzzleFlare(gun) = ball × AMMUNITION[ammo].gauge × flare` drives the flash, the ember shower,
+the reach of the borrowed light and the spawn offset alike, so a change to a round's gauge can never
+leave its flash behind — which is exactly what had happened once the rounds became sculpts drawn
+1.7–2.6× the bore and started out-shining the charge that fired them. Period flame is 4–8 bore
+diameters, so the clean-burning rifle sits lowest (4.9) and the field gun highest (6.0).
+
+`spawnMuzzleFlash()` stacks four layers, because one additive sprite is capped at opacity 1 and cannot
+be made brighter: the billboarded **star** (`muzzleFlashTexture()` — thirteen petals, three long
+primary jets, and a halo holding flat white out to a fifth of its radius, since the bloom pass only
+grips what already clips); a small pure-white **core** stacked over it; a **jet** cone laid along the
+aim (*not* billboarded, so the flame grows down the barrel and shows which way the round went); and
+the warmer **lead bloom** a barrel's width out. All four are **held at full brightness for the first
+fifth of the life** (`IGNITION`) before falling off on `(1-t)²·¹` with a flicker — powder ignites in one
+frame, and a flash that starts decaying on frame one never registers at 60 fps.
+
+All four are flown as *generated* sculpts (`SHOT_MODELS`, primed by `primeShotModel()`); each sculpt
+is reported *directionless*, so its measured long axis is taken as the nose. A kind whose GLB has not
+landed yet is forged procedurally instead, so gunfire never waits on a download.
+
+Each barrel also fires a recorded take (`GUN_AUDIO_URLS` + `GUNS[kind].voice`) with a per-barrel
+amount of synthesised voice left underneath it for weight (`SHOT_VOICES` — 34 % under the musket's
+hard transient, 60 % under the flintlock's much more diffuse one), and the ball's arrival has its own
+whine-into-thud (`audio.ballImpact()`). Anything not yet decoded falls back to the synth.
+
+**Every take is aligned and levelled off the audio itself**, because a generated sound effect is a
+clip rather than an event. `analyseTake()` finds each shot's true onset — from the loudest 4 ms window
+walked *backwards* to the foot of the attack, since a threshold crossing just latches onto the room
+tone — and playback starts there, so the report lands on the frame it is asked for. The first set of
+barrels measured 54 ms of silence in front of the musket's crack and did not peak until 171 ms in on
+the rifle: the shot was seen, then heard. Levels are normalised to a common peak as well, since
+recordings came back across a 9× spread that swamped the authored mix.
+
+**The trigger is its own sound.** `GUNS[kind].lock` is real lock time — the 38–120 ms a muzzle-loader
+takes to get from the sear releasing to the charge in the barrel lighting. `audio.triggerPull()`
+(sear break, flint on the frizzen, priming hiss) fires on the frame the trigger is pulled and
+`audio.gunshot()` follows one lock time later, on the same frame as the muzzle flash. The marksman's
+hand-fitted piece has the fastest ignition on the board; the field gun's vent has the slowest, with a
+longer, lower fuse hiss in place of the flint scrape.
+
+**The arrival breaks the body open** (`src/scene/shatter.ts`, `spawnImpactShatter()`). The far end of
+a shot used to be the same warm sprite burst as a sword blow, which reads as magic rather than as
+impact, so it is now built from geometry in two instanced draw calls:
+
+- **A punch ring** square to the line of flight (not billboarded), snapped open and gone inside
+  0.18 s — it exists only to say *where* the round went in.
+- **Sparks** as stretched four-sided slivers oriented along their own velocity, so each one draws a
+  streak that turns as it flies and its length tracks its speed. They leave in a cone thrown *back*
+  at the shooter (spall comes off the struck face), cool white → orange → dull red on their own
+  clocks via per-instance colour, gutter rather than fade, skitter off the flagstones, and a few
+  always outlive the rest so the shower does not stop like a switch.
+- **Fragments** — crushed tetrahedra with per-instance colour, tumbling on their own axes under
+  gravity, bouncing off `BOARD_TOP` with material-specific restitution and tangential friction,
+  coming to rest and then pulled under in the last quarter of their life.
+
+What comes off is read off the **victim**, not the shooter: `impactBody()` maps army × rank onto
+`marble` (kingdom stone), `obsidian` (Sun Empire glass — long flake slivers, jade fleck),
+`uniform` (navy wool, buff leather, gilt braid, brass), `plate` (steel spall and the brightest spark
+shower on the board, for the cuirassier and the guardians) or `flagstone` for the round shot's
+ricochet. How hard it breaks comes from the round: `AMMUNITION[kind].shatter` (0.72 pistol → 2.5
+round shot) and `.through`, which decides whether there is exit spall as well as entry. The dust the
+caller layers over the top is tinted by `impactDust(body)`, and the instance count is capped by
+`captureParticles`, so the whole thing scales down with the graphics preset.
+
+**The powder bank is built as air, not as a sprite pop.** Each lobe of `spawnPowderCloud()` runs on
+its own clock, integrated from its absolute age (closed form, so it looks identical at any frame
+rate) through three phases: lobes are **born in sequence** across the vent (0.17 s smoothbore,
+0.10 s rifle) with the first gas shoved hardest, that speed is then eaten by the air
+(`jet/drag · (1 − e^−drag·age)` — a lunge of about a square, then a stall), and from there only
+buoyancy (building as `age²`, so smoke sags off the barrel before it climbs), `HALL_DRAFT` and a
+per-lobe `sin` curl move it. It dissolves because it **spreads**: opacity carries
+`(seed/width)^1.35` on top of its fade, lifetimes vary per lobe, and `floor` flattens anything that
+sags to `BOARD_TOP` instead of sinking through the stone. `GUNS[kind].smokeHang` states the linger
+(1.7 s flintlock → 3.8 s field gun) and `boreTrickle()` keeps emitting wisps at the **live**
+`muzzleOrigin()` afterwards, so the thread of smoke follows the barrel as the weapon comes down.
+
+`GUNS[kind]` also carries the character of the *smoke* as well as the bore. The marksman's rifled
+barrel fires a small, tight-patched charge that burns almost completely, so its bank is built from
+`fineSmokeTexture()` — a pale, threadier bloom — tinted a fixed ash grey (`0xdfe4ea`) instead of
+the faction livery, at 0.74 density. Less smoke than a musket is answered with **more, smaller
+lobes** (12 against 8) that leave faster, stall sooner and lift harder — hanging 3.2 s with the bore
+trickling 1.5 s after — rather than with a thicker cloud. Every other barrel keeps the dirty
+livery-tinted bank.
+
+**A held firearm has no rest angle.** Blades and staves are parented to a hand bone at a fixed
+body-space angle, which is fine for a blade at rest but leaves a rifle standing upright
+through an aiming clip. Firearms declare `hold` in `weapons.ts` instead and are re-solved against
+the live skeleton every frame (`AttachedArms.align()`, called right after the mixer):
+
+- `"longArm"` (marksman's rifle, line musket) is laid **downrange** — along the figure's own front,
+  since a shooter has already turned to face what he is shooting at — with the two fists supplying
+  only the cant (`LONG_ARM_CANT`, 0.4) and the elevation (`LONG_ARM_PITCH`, 0.8, clamped to ±0.6).
+  A levelled musket therefore lies about 20° across the body, butt in the firing shoulder and muzzle
+  crossing toward the support hand, and the muzzle marker follows.
+
+  It used to take the barrel line *straight* from the vector between the two fists, on the assumption
+  that a shouldered clip puts the support hand out on the forestock. Measured on the rigs that
+  actually shoot, that assumption is false. The Grande Armée's aim takes are archery clips, and in
+  them the fists sit side by side **across the chest**: the hand line runs 0.90–1.00 along the
+  figure's lateral axis, leaving almost nothing along its front — and the residue that was being used
+  as the barrel's direction changes sign several times per loop. The line infantry's aim reads front
+  = −0.24, −0.23, +0.27, +0.54, +0.40, −0.22, +0.02, −0.28 across one scan, and its firing clip is at
+  −0.26 on the authored ignition frame, so the musket swung between pointing downrange and pointing
+  back over its owner's shoulder — and the shot was taken from the reversed half. Under the current
+  rule every clip on both rigs (stance, aim, strike, march, reload, rise, death) sits 3–22° off the
+  front with no sign changes anywhere.
+- `"sidearm"` (the officer's flintlock) follows the forearm through the wrist, lifted toward the
+  figure's front so an arm hanging at rest carries the pistol low rather than aiming at its own boot.
+  That front bias is why the pistols never reversed — the Emperor's and the commander's aim clips are
+  the *same* mirrored archery takes, but their barrels were already guaranteed downrange. The long
+  arm simply lacked the equivalent guarantee.
+
+Roll is taken from the barrel pitched a quarter turn about the figure's lateral axis — the one rule
+that holds at both ends of the swing (trigger guard forward when upright, floorward when levelled)
+without flipping in between; projecting the body's front, as the blades do, collapses the moment a
+gun points where the figure is looking. Carried guns are also exempt from the floor-clearance clamp
+that slides grounded shafts up through the fist — that clamp is what had the crouching marksman
+holding his rifle by the butt plate.
+
+The fire's light comes from `SpellLightPool` (`src/scene/spells.ts`): three point lights created
+once with the scene and lent out per bolt. A light per fireball crashed the tab — three.js keys
+its shader programs on the scene's light counts, so the whole hall recompiled mid-fight. Pooled
+lights are never removed *or hidden* (an invisible light leaves the render state, which changes
+the count just as removing it would); they are dimmed to zero and handed back, and a fourth
+simultaneous bolt simply gets no light.
+
+## Sculpted arms: the Napoleonic weapons
+
+`weapons.ts` builds arms out of boxes, cylinders and extrusions, which is the right answer for the
+medieval and Sun Empire families — nobody can hold a fantasy greatsword up against an original. The
+Grande Armée's arms are different: a Charleville Model 1777, an An XI cuirassier sword and an An XIII
+officer's flintlock are documented objects, so all six are **generated meshes** listed in
+`ARM_SCULPTS` (`src/assets/generated.ts`) — musket with fixed bayonet, Versailles rifled carbine,
+cuirassier sword, general's dress sabre, Marengo presentation sword, officer's pistol.
+
+The work is not the download, it is the pose. **A generated weapon arrives lying anywhere**: the
+cuirassier sword measures 0.97 × 1.00 × 0.96 because it runs along the diagonal of its own bounding
+box, so its file says nothing about which way the blade goes, which end is the point, or which side
+the trigger guard is on. `armoury.ts` therefore *measures* each sculpt (`fitArmSculpt`) and fits it
+into the same local frame the primitives are authored in — length up `+Y`, butt on the origin:
+
+- **Long axis** from the principal axes of the vertex cloud (Jacobi on the covariance). A bounding
+  box cannot answer it for a diagonal model: all three sides are equal and none is the blade.
+- **Which end is the point** from the cross-section at each end — muzzles, bayonets and blade tips
+  taper; butt plates and bowl guards do not. The Marengo sword arrives hilt-last, the pistol
+  muzzle-first, and neither needs a special case.
+- **Roll** from the remaining two axes. A blade keeps its flat across the swing (`±X`, as
+  `curvedBlade` authors it) so a sculpted sabre still cuts edge-first; a firearm's lock plane stands
+  in the barrel's plane (`±Z`), with the guard side found by stepping from the **bore to the stock**:
+  the slice behind the muzzle is bare barrel, the butt quarter is all wood and furniture, and a gun's
+  stock hangs *below* its bore, so the offset between the two points at the underside. That keeps
+  `gunOrientation`'s guard-forward promise true for a mesh nobody rotated by hand.
+
+  This used to be read off the **centroid** — muzzle third against the middle of the whole cloud —
+  which says the same thing only while nothing but the gun pulls that centroid off the bore. The
+  Versailles rifle broke it: its slack sling loops `0.34` of the weapon's length clear of the stock,
+  four times the rifle's own lateral thickness (`0.087`), which dragged the centroid past the barrel.
+  Both long arms were therefore fitted **upside down** — sling arcing over the barrel, lock and
+  trigger guard turned at the sky — on every figure that carried one. The pistol, with no sling to
+  fool it, was right all along and reads the same under either rule.
+- **Which way round** — the *sign* of that roll, which no eigenvector can give: `±narrow` both put
+  the flat across the swing, so which one came back was whatever the Jacobi sweep happened to hand
+  over. Invisible on a straight blade, and the entire silhouette on a curved one. A blade therefore
+  settles it by the **bow of its own curve**: the belly (convex side) is put on `+X`, the side
+  `curvedBlade` sweeps toward and `knuckleBow` bulges toward. A straight court sword has no curve to
+  read (the Marengo sword bows 0.03% of its length), so it falls back to the hilt's own lump.
+
+  Which way that belly has to face on a *figure* is not the fitter's business, because
+  `restOrientation` projects the **body's** front and the body's front does not mirror with the hand:
+  the prop's `+X` lands on the body's `+X` — the figure's left — whichever fist holds it. So a
+  `WeaponSpec.edged` blade is rolled half a turn (`EDGED_FLIP`) in the fist where `+X` is the outward
+  side, and the belly always bows *across* the body. That is the difference between a sabre and a
+  sickle: on the Emperor's rig, bowed outward his dress sabre came to rest with the point at 0.80 out
+  and 1.68 up on a 1.70 figure, its tangent curling back in over the crown of his own bicorne; bowed
+  across, the point keeps going outward (0.85) and away from him.
+
+Only the **fist** and the **bore** are authored, as fractions of the weapon's length, because no
+measurement finds a trigger. Both were read off each sculpt's cross-section profile and land within a
+couple of percent of the props they replace (rifle fist 0.30 vs 0.30, musket bore 0.80 vs 0.77). The
+musket's marker is the bayonet *socket*, not its point — the flash leaves the barrel, not the blade
+beyond it. `armoury.test.ts` throws a primitive sword and musket into a random orientation and checks
+they come back on their butts, point up, guard forward — plus a **slung** musket, whose loop is
+authored far enough off the underside to move the centroid past the bore, so the roll can never
+regress to the centroid test again, and a **swept sabre** fed in from both halves of the roll, which
+has to come back belly-on-`+X` either way.
+
+The swap is invisible to everything downstream: the sculpt supplies grip and muzzle, the loadout
+still owns rest angle, wrist offset and `hold`, so the marksman kneels and levels exactly as before.
+Sculpts download **with** the rosters (`armSculptWarmJobs`, sharing the one window in `gltfQueue.ts`)
+because a figure is armed the instant it is built — a weapon that lands late is a musket the rest of
+the game never sees. Geometry and textures are shared army-wide, materials are per figure (highlight,
+fade and dissolve write into them), and a failed download falls back to the primitives.
+
+## Swapping in different character models
+
+The static fallback sculpts are the `still` roster of each army in `src/assets/generated.ts`:
+
+```ts
+export const ARMY_SKINS: Record<ArmySkinId, ArmySkin> = {
+  ivory: {
+    arsenal: "kingdom",
+    native: "w",
+    still: { k: "…king.glb", q: "…queen.glb", /* … */ },
+    animated: { /* rigged GLB + one GLB per clip */ },
+    cries: { /* one voice per rank */ },
+  },
+  /* sun, empire … */
+};
+```
+
+Drop higher-quality glTF/GLB characters into `public/models/` and point the entries at
+`/models/your-king.glb`. Requirements:
+
+- Y-up, facing +Z (or edit `PIECE_MODEL_ORIENTATION` in the same file — the loader derives
+  the correction quaternion from the declared front/up axes).
+- Any scale: `PieceFactory.normalize()` measures the model and rescales it to the height in
+  `PIECE_HEIGHT` (`src/scene/pieces.ts`), then centres it on X/Z and grounds it on Y.
+
+`PIECE_HEIGHT` is **two tiers, not six**: knight, mage and tower guardian stand in the royal band
+with the queen (0.98 / 1.00 / 0.99 vs 1.00), the king alone rises to 1.12, the pawn holds the lower
+tier at 0.78. At their old 0.84-0.88 the three officers read as footsoldiers at camera distance, and
+at its old 0.70 the pawn — sixteen of the thirty-two figures on the board — read as a token sitting
+on its square rather than a soldier holding it. Crests and flat map tokens are re-ranked with them
+(`BADGE_SCALE`, `TOKEN_SCALE` in `scene/rankBadges.ts`).
+
+The battery's towed gun is sized against the **crewman**, not against the sculpt it was drawn at:
+`WeaponSpec.bulk` is 1.22, which puts the wheels at about half the artillery guard's height (a real
+Gribeauval rolls on wheels four fifths of a man's height — the old 0.85 left them at a third, and the
+rank read as an officer wheeling a toy). Because one square is only `TILE` wide, the extra size is
+paid for by **`WeaponSpec.track` (0.8)**, a squeeze on the gun's own X — the axle. Wheels stand in
+the YZ plane, so a narrower track only thins their tyres and never turns a wheel into an ellipse.
+With the park at `(0.2, 0, -0.04)` and the hauling yaw eased to 0.07 rad, the enlarged carriage
+overhangs its tile by 0.03 units where the smaller one overhung 0.11.
+- Materials are cloned per instance and tinted per faction in `applyFactionLook()`.
+
+If a rigged model fails to download the loader falls back to the static sculpt, and if that
+fails too, to a procedural primitive figure — the game always stays playable.
+
+To animate your own characters, fill that army's `animated` roster with a rigged GLB plus a GLB
+per clip; any missing clip is simply skipped, and a clip whose download failed is retried on
+demand the next time the game needs it. A new army is one `ARMY_SKINS` entry plus a `LOADOUT`
+row in `weapons.ts` — the settings panel renders `ARMY_SKIN_ORDER`, so it appears on its own.
+
+For shipping, compress the GLBs instead of streaming them from a remote host:
+
+```bash
+bunx @gltf-transform/cli optimize king.glb public/models/king.glb \
+  --compress draco --texture-compress webp --texture-size 1024
+```
+
+## Battleground scenery
+
+`arena.ts` used to describe a map purely as light: sky, fog, stone tints, fire strength, tile
+contrast and the film grade. That is enough to move the *same* ruined field from morning to
+midnight, and it is not enough to make a place. Bleaching the stone ochre and hanging a white-hot
+sun overhead produced a very sunny siege, not a desert; the snowfield was the same field again at
+another colour temperature. What separates those grounds is not the light falling
+on them, it is **what is standing on them**.
+
+So every `ArenaLook` now also carries a `SceneryLook`, and `dressing.ts` stages it: a grove
+(`pine` / `palm` / `bare`), a rock scatter (`dune` / `boulder` / `drift`), standing stones
+(`obelisk` / `menhir`), standing water, and a weather field. Kinds are an
+enum rather than free-form because every kind's geometry is built **once at boot** and then shown,
+hidden and recoloured per theme — the rule `jungle.ts` already followed — so switching map never
+allocates geometry mid-frame. Everything is instanced and stays outside the shadow camera (which
+only covers the board), so a fully dressed map is a handful of draw calls.
+
+**The identity matrix is not "nowhere".** An `InstancedMesh` slot nobody writes to keeps the
+identity transform, which is a full-size prop standing at the origin — and the origin is the middle
+of the board. Two pools were doing exactly that: `buildMonoliths()` created the gilded caps *after*
+the obelisk pass that places them, so all five stayed at unit scale on the centre four squares, and
+the whole weather field spent its first frame stacked there as well. Rebuilding the dressing
+headless and dumping every instance transform found 5 octahedra plus 520–720 quads at radius 0.00,
+against a board that only reaches 4.08 m.
+
+Caps are now built before the pass that places them, and every pool is **parked** — a zero-scale
+matrix written into all slots at construction — so a slot that is never placed, or not placed yet,
+is degenerate and rasterises nothing. Same probe afterwards: the closest piece of dressing on any
+map is 23.6 m out, which is `CLEAR_RADIUS`, as intended.
+
+One trap when checking this: `Matrix4.decompose()` cannot read a zero scale back out — it reports
+`1, 1, 1` for an all-zero matrix — so a parked slot looks like a unit-size prop at the origin to any
+test that decomposes it, and the first probe run duly "failed" against a fix that was already
+working. Test `matrix.determinant() === 0` instead.
+
+All kinds share one `scatter()` helper, sorted outward from the board, so a theme's dunes and its
+palms agree about where the ground is and lowering the graphics preset thins the far field first —
+the ring that frames the board is the last thing to go. `applyQuality()` does not touch counts
+directly; it stores a density and re-runs `applyArena()`, so every count and visibility flag is
+derived in exactly one place.
+
+### Rain, snow and sand are one system
+
+They are not three particle engines. They are the same field of streaks, and `WEATHER_PROFILES`
+holds the only things that differ — the tilt off vertical, the fall speed, and the streak's
+proportions:
+
+- **rain** — 0.26 rad, 19 m/s, 0.035 × 1.5 m: long thin lines, leaning with the wind.
+- **snow** — 0.10 rad, 1.7 m/s, 0.14 × 0.2 m, plus a sine wander: short fat tumbling flakes.
+- **sand** — 1.31 rad, 24 m/s, 0.05 × 2.4 m, ceiling 7 m: barely falling at all, *carried*, and
+  hugging the dunes instead of filling the sky.
+
+A streak travels **along its own axis** (`sin/cos` of the tilt), not straight down, so a leaning drop
+moves the way it is drawn instead of sliding sideways through itself. One `streakTexture()` serves
+all three: a soft core tapered at both tips, so a particle never starts or stops on a visible cut.
+
+The streaks are flat quads, so edge-on they would vanish. Rather than billboarding 700 instances
+per frame, the field is a **cylinder** centred on the board and the whole `weatherGroup` is turned
+to the camera: rotating a cylinder of uniformly-scattered points about its own axis leaves an
+identical distribution, so this is exact rather than an approximation, and it costs one rotation per
+frame instead of seven hundred. Seeding uses `sqrt(random) * radius` so the disc fills evenly
+instead of crowding the middle, and a profile change re-seeds any streak left stranded above the new
+ceiling.
+
+### Landmarks
+
+`scene/landmarks.ts` stands one generated sculpt per map out on the plain — a ruin, a wreck, a
+colossus — cloned two or three times onto a ring. `Dressing` covers the *ground*; a scatter of
+instanced blobs reads as terrain, and terrain has no landmark to recognise, so two maps with the
+same vocabulary of props stay interchangeable no matter how they are lit.
+
+**The ring radius is solved from the map's own fog.** `FogExp2` keeps `exp(-(d·ρ)²)` of an object's
+colour, and the six maps run densities from `0.0085` (Dawn Court) to `0.019` (dusk) — better than a
+factor of two, so one hard-coded distance would put the same sculpt in clear air on one map and
+behind a wall of murk on another. Inverting for a fixed transmittance gives `d = sqrt(-ln T) / ρ`;
+`LANDMARK_TRANSMITTANCE = 0.45` yields **105 m** (dawn), **85 m** (jungle), **78 m** (sands),
+**74 m** (frost), **54 m** (storm) and **47 m** (dusk), clamped to `[34, 118]`. Same weight in the
+frame on every map, one line of arithmetic instead of six tuned constants.
+
+Other rules:
+
+- **Lazy, per theme.** Only the staged map's GLB is fetched, through the shared `loadGltf` window,
+  and it is cached as a built ring afterwards — shown and hidden per theme like everything else in
+  the dressing. A map switched away from before its download lands simply stages nothing.
+- **Measured, not trusted.** A generated GLB arrives at whatever scale and offset the generator
+  chose, so each is scaled by its own bounding height to `source.height` metres, centred on X/Z and
+  stood on `box.min.y`, then dropped onto `terrainHeight(x, z) - 0.7` like the rest of the dressing.
+- **Yaw is data, not a constant.** Each copy is turned to face the board (`atan2(-x, -z)`) and then
+  offset by the sculpt's own `yaw`, measured from the finished model — a generated model's "front"
+  is whatever the generator made it.
+- **No shadows, no `battleProps` preset.** The shadow camera only covers the board, so a landmark
+  60 m out would cost a shadow pass to cast nothing; and the whole system is off on `low` with the
+  other battle props.
+- Copies are spread by the **golden angle** from a per-theme seed, so no two line up behind each
+  other on the camera's orbit and none lands square on a cardinal axis. The seed is derived from the
+  theme's name, so a map's skyline is identical every session.
+
+### The picker
+
+`ARENA_CARDS` in `assets/generated.ts` holds one painted establishing shot per theme. The card art
+is layered **on top of** the palette gradient in `.mc-arena-swatch`, never instead of it: the
+gradient is still the element's background, so a card that is still downloading — or one that never
+arrives — leaves a picker that still reads as seven distinct grounds instead of a row of empty
+holes. Images are `loading="lazy"`, carry an empty `alt` (they are decoration; the label under each
+card is what names the map), and are knocked back to `opacity: 0.8` / `saturate(0.88)` so the gilt
+label stays the brightest thing on the card — only the chosen map comes fully up.
+
+`ARMY_CARDS` does the same job for the three skins, painted in the same series so the muster panel
+reads as one set rather than two unrelated pickers. The livery gradient stays as
+`.mc-army-swatch`'s background and `.mc-army-art` sits over it with the identical rules
+(`loading="lazy"`, empty `alt`, `opacity: 0.78` / `saturate(0.88)`, full brightness on
+`[data-active="true"]`, `scale(1.06)` on hover, no transform under `prefers-reduced-motion`). The
+swatch went from `1.5rem` to `2.5rem` tall: a 24px strip is enough for a gradient and not enough for
+a painting, and the bottom scrim (`::after`) keeps a bright sky off the name underneath.
+
+## Audio
+
+Generated MP3s are streamed once and decoded into Web Audio buffers: a hall ambience bed, **one
+score per battleground**, and a tension stem that crossfades in during check and the endgame, plus
+piece, clash, horn and fanfare one-shots. UI blips, footsteps, the wooden set-down knock and the
+claim motif played when a square changes hands (`conquest()`) are synthesised with oscillators and
+noise buffers. Everything routes through one master gain for the mute toggle, and playback only
+starts after the first user gesture (browser autoplay policy).
+
+### One score per map
+
+The score is no longer a bed like the other two. `ARENA_SCORES` in `assets/generated.ts` holds one
+track per `ArenaTheme`, `audio.setArena(theme)` crossfades to it over `SCORE_SWAP_FADE = 2.6` s, and
+the whole thing hangs off a `scoreBus` *inside* the ducking bus — so a death cry still pulls the
+music down whichever map it belongs to, and `setIntensity()` rides the bus (`0.34 → 0.22` at full
+tension) rather than any single track. Calling `setArena()` before `unlock()` is fine: the choice is
+remembered and the map's score is simply the one that starts. Buffers are cached per theme, so
+switching back and forth costs nothing, and a track that finishes decoding after the player has
+moved on again is dropped instead of pushed over what is now playing.
+
+**Two things about a generated track cannot be trusted, and both were measured off the delivered
+MP3s rather than assumed.**
+
+*Loudness.* The scores came back between **-13.3 LUFS** (Frostfall) and **-33.4 LUFS** (Dune
+Bastion) — a **20.1 LU** spread. Under one shared `BED_VOLUME.score`, "which map has the loudest
+music" would have been decided by which render happened to be hottest, exactly the problem the
+recorded gunfire already solves with `TAKE_PEAK`. Each track therefore carries its measured
+`loudness` and the mixer derives its gain from `SCORE_TARGET_LOUDNESS = -18.5` — the loudness of the
+original dusk score, because that is the track the rest of the mix was balanced underneath.
+`SCORE_GAIN_RANGE = [0.35, 6]` bounds the correction so a hissy take is never boosted into noise;
+the quietest score needs ×5.55, and at that gain its true peak (-7.3 dBFS) still leaves headroom
+under the bus.
+
+*Loop points.* `source.loop = true` butt-joins the buffer's last sample to its first, and these
+tracks were not written to survive it. Measured head/tail silence (50 ms windows against a -50 dBFS
+floor):
+
+- Dawn Court ends with **2.20 s** of silence and opens at level — a hole, then a jolt.
+- Sun Temple **1.50 s** — same shape.
+- Stormwatch and Frostfall are still playing at the **final sample** — a hard restart instead.
+- Only the original dusk track fades at both ends, which is why plain looping had never sounded
+  broken before there was more than one score.
+
+So each score stores its `lead` and `tail`, and a `ScoreVoice` loops *inside*
+`[lead, duration - tail]`: every pass is its own `AudioBufferSourceNode` started with an offset and a
+length, passes overlap by `SCORE_LOOP_FADE = 1.2` s, and the next pass is armed on a timer 1.5 s
+ahead but scheduled against the **audio clock**, so drift in `setTimeout` never moves the seam.
+
+The crossfade curves are **equal-power** (`sin`/`cos`, 48 points via `setValueCurveAtTime`), not
+linear. A linear crossfade is right for two copies of the same signal; the two sides of a loop seam
+are unrelated material, and summing them linearly dips about 3 dB in the middle — audible as a small
+hole every time the track comes round, which is precisely the artefact this was meant to remove.
+Note that no `setValueAtTime` may sit inside a value curve's own time range (`NotSupportedError`);
+nothing flows through the pass gain before its source starts, so none is needed.

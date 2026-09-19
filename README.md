@@ -1,4 +1,26 @@
+# Jev vs Fly 🪰♟️
+
+**TypeSafe's Jev (a System One decision model) plays chess against a fruit-fly brain.**
+
+This repository is a fork of [fly-chess](https://github.com/cesp99/fly-chess). The connectome
+engine is unchanged. On top of it:
+
+- [`experiments/`](experiments/) — four ways of asking Jev to pick a legal move, compared on
+  curated positions. The earlier search-and-persona attempt lives in `experiments/v0/`.
+- [`game/`](game/) — wizard chess. Jev's move is a server-side TypeSafe Choice;
+  the fly still runs in the browser from the published FlyWire blob. The 3D hall
+  is King's Gambit; the pieces smash whoever they take.
+
+```bash
+export TYPESAFE_API_KEY=…          # never commit this
+fly jev-compare                    # writes experiments/results/comparison.md
+fly jev-vs-fly                     # API at :8766; 3D hall at :8080/?autoplay=1
+```
+
+---
+
 # fly-chess 🪰♟️
+
 
 **A chess engine whose neural network is a fruit fly's brain.**
 
