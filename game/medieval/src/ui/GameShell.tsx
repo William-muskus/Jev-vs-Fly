@@ -21,7 +21,7 @@ import { wizardGlbKinds } from "../scene/wizardRoster";
 import { GameOverModal } from "./GameOverModal";
 import { Hud } from "./Hud";
 import { useHasKeyboard } from "./inputMode";
-import { cinemaEnabled } from "./jevflyFlags";
+import { cinemaEnabled, FLY_PLAYER_NAME, JEV_PLAYER_NAME, jevFlySideNames } from "./jevflyFlags";
 import { MainMenu, type MatchConfig } from "./MainMenu";
 import type { MusterChoice } from "./Muster";
 import { SettingsPanel, type GameSettings } from "./SettingsPanel";
@@ -451,6 +451,7 @@ export function GameShell() {
     [controller, showcaseCamera, stopAttract],
   );
 
+  const autoStarted = useRef(false);
   const startJevVsFly = useCallback(async () => {
     stopAttract();
     void audio.unlock();
@@ -468,6 +469,7 @@ export function GameShell() {
       await flyClient.load("/model/");
     } catch (err) {
       setNotice(`Could not load the fly brain: ${err instanceof Error ? err.message : String(err)}`);
+      autoStarted.current = false;
       return;
     }
     const jevMover = async (fen: string) => {
@@ -485,11 +487,11 @@ export function GameShell() {
     const flyMover = async (fen: string, history: string[]) => {
       try {
         const move = await flyClient.bestMove(fen, history);
-        if (!move) throw new Error("Fly returned no move");
+        if (!move) throw new Error(`${FLY_PLAYER_NAME} returned no move`);
         return move;
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
-        setNotice(`Fly could not move: ${message}`);
+        setNotice(`${FLY_PLAYER_NAME} could not move: ${message}`);
         throw err;
       }
     };
@@ -497,7 +499,7 @@ export function GameShell() {
       jevWhite
         ? { w: jevMover, b: flyMover }
         : { w: flyMover, b: jevMover },
-      jevWhite ? { w: "Jev", b: "Fly" } : { w: "Fly", b: "Jev" },
+      jevFlySideNames(jevWhite),
     );
     controller.setMaxPlies(maxPlies);
     const wizardSkins = { w: "wizard" as const, b: "wizard" as const };
@@ -537,7 +539,6 @@ export function GameShell() {
     setPhase("playing");
   }, [controller, showcaseCamera, stopAttract]);
 
-  const autoStarted = useRef(false);
   useEffect(() => {
     if (autoStarted.current) return;
     if (phase !== "menu" || introPlaying) return;
@@ -562,8 +563,8 @@ export function GameShell() {
       body: JSON.stringify({
         pgn: snapshot.pgn,
         result,
-        white: snapshot.sideNames?.w ?? "Jev",
-        black: snapshot.sideNames?.b ?? "Fly",
+        white: snapshot.sideNames?.w ?? JEV_PLAYER_NAME,
+        black: snapshot.sideNames?.b ?? FLY_PLAYER_NAME,
         reason: snapshot.result?.reason ?? null,
       }),
     }).catch(() => undefined);
@@ -914,7 +915,7 @@ export function GameShell() {
         ) : null}
 
         {notice ? (
-          <div className="mc-fade mc-slate pointer-events-none absolute bottom-20 left-1/2 -translate-x-1/2 px-4 py-2 text-xs text-[#e4d3ac]">
+          <div className="mc-fade mc-slate pointer-events-none absolute bottom-20 left-1/2 max-w-lg -translate-x-1/2 px-4 py-2 text-center text-xs text-[#e4d3ac]">
             {notice}
           </div>
         ) : null}

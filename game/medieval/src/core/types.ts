@@ -141,7 +141,7 @@ export interface GameSnapshot {
   paused: boolean;
   /** 1-based showcase game counter (auto-rematch increments it). */
   demoRound: number;
-  /** Display names for the two armies (Jev / Fly in the match, Ivory / Obsidian otherwise). */
+  /** Display names for the two players (Jev / Fruit Fly in the match, Ivory / Obsidian otherwise). */
   sideNames: { w: string; b: string };
 }
 

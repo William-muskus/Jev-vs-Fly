@@ -64,6 +64,7 @@ the file). The field tally under the turn slate now draws a stacked Jev|Fly
 clock bar plus a filling meter per army (elapsed wall time, not a countdown).
 `speed` scales think
 time *and* smash beats (try `speed=4` so a full game is watchable).
+`flyGpu=1` lets the connectome worker use WebGPU (off by default).
 `cinematics=0` skips the long capture camera work.
 
 When a duel ends, the hall POSTs the PGN to `/api/game-record`. That writes
@@ -90,6 +91,12 @@ process).
 The first load fetches ~30 MB of fly brain into `game/.model-cache/` (gitignored)
 from [cesp99/fly-chess](https://huggingface.co/cesp99/fly-chess) and serves it
 same-origin so the worker does not trip Hugging Face CORS.
+
+If the hall says **Could not load the fly brain** / **fly worker crashed**, the
+Python API is usually not running (or died). Keep `python -m game.server` up in
+the venv, then click **Jev vs Fly** again (or hard-reload). The 3D hall uses the
+plain-JS connectome engine so it does not fight the board's WebGL context;
+`?flyGpu=1` turns WebGPU back on.
 
 ## Your Cults STLs (on your computer)
 

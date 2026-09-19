@@ -1,4 +1,11 @@
 import type { EngineMove } from "./aiClient";
+import {
+  explainFlyLoadFailure,
+  flyGpuEnabled,
+  flyWorkerCrashMessage,
+  isFlyWorkerCrash,
+  preflightFlyApi,
+} from "./flyLoad";
 import type { PieceKind, SquareId } from "../core/types";
 
 type FlyDifficulty = "larva" | "fly" | "superfly";
@@ -8,6 +15,8 @@ interface FlyReply {
   move?: string | null;
   message?: string;
 }
+
+const LOAD_TIMEOUT_MS = 180_000;
 
 /**
  * The FlyWire connectome worker from this repo's `web/engine`.
@@ -21,36 +30,89 @@ export class FlyClient {
   difficulty: FlyDifficulty = "fly";
 
   load(baseUrl = "/model/"): Promise<void> {
-    if (this.ready) return this.ready;
-    this.worker = new Worker("/engine/worker.js", { type: "module" });
-    this.worker.onmessage = (ev: MessageEvent<FlyReply & { id?: number }>) => {
-      const msg = ev.data;
-      if (msg.type === "progress" || msg.type === "thinking" || msg.type === "backend") return;
-      if (msg.type === "ready") {
-        const p = this.pending.get(0);
-        this.pending.delete(0);
-        p?.resolve(msg);
+    if (!this.ready) {
+      this.ready = this.loadBrain(baseUrl).catch((err) => {
+        this.ready = null;
+        this.teardown();
+        throw new Error(explainFlyLoadFailure(err));
+      });
+    }
+    return this.ready;
+  }
+
+  private async loadBrain(baseUrl: string): Promise<void> {
+    await preflightFlyApi(baseUrl);
+    const wantGpu = flyGpuEnabled();
+    try {
+      await this.boot(baseUrl, wantGpu);
+    } catch (err) {
+      if (wantGpu && isFlyWorkerCrash(err)) {
+        this.teardown();
+        await this.boot(baseUrl, false);
         return;
       }
-      if (msg.id && this.pending.has(msg.id)) {
-        const p = this.pending.get(msg.id)!;
-        this.pending.delete(msg.id);
-        if (msg.type === "error") p.reject(new Error(msg.message || "fly error"));
-        else p.resolve(msg);
-      }
-    };
-    this.worker.onerror = (ev) => {
-      for (const p of this.pending.values()) p.reject(new Error(ev.message || "fly worker crashed"));
-      this.pending.clear();
-    };
-    this.ready = new Promise<void>((resolve, reject) => {
+      throw err;
+    }
+  }
+
+  private boot(baseUrl: string, gpu: boolean): Promise<void> {
+    this.teardown();
+    return new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pending.delete(0);
+        reject(new Error("fly brain load timed out"));
+      }, LOAD_TIMEOUT_MS);
       this.pending.set(0, {
-        resolve: () => resolve(),
-        reject,
+        resolve: () => {
+          clearTimeout(timer);
+          resolve();
+        },
+        reject: (err) => {
+          clearTimeout(timer);
+          reject(err);
+        },
       });
-      this.worker!.postMessage({ type: "load", baseUrl });
+      const worker = new Worker("/engine/worker.js", { type: "module", name: "fly-brain" });
+      this.worker = worker;
+      worker.onmessage = (ev: MessageEvent<FlyReply & { id?: number }>) => {
+        const msg = ev.data;
+        if (msg.type === "progress" || msg.type === "thinking" || msg.type === "backend") return;
+        if (msg.type === "ready") {
+          const p = this.pending.get(0);
+          this.pending.delete(0);
+          p?.resolve(msg);
+          return;
+        }
+        if (msg.id && this.pending.has(msg.id)) {
+          const p = this.pending.get(msg.id)!;
+          this.pending.delete(msg.id);
+          if (msg.type === "error") p.reject(new Error(msg.message || "fly error"));
+          else p.resolve(msg);
+        }
+      };
+      const fail = (err: Error): void => {
+        for (const p of this.pending.values()) p.reject(err);
+        this.pending.clear();
+      };
+      worker.onerror = (ev) => {
+        fail(new Error(flyWorkerCrashMessage(ev)));
+      };
+      worker.onmessageerror = () => {
+        fail(new Error("fly worker crashed"));
+      };
+      worker.postMessage({ type: "load", baseUrl, gpu });
     });
-    return this.ready;
+  }
+
+  private teardown(): void {
+    if (!this.worker) return;
+    this.worker.onmessage = null;
+    this.worker.onerror = null;
+    this.worker.onmessageerror = null;
+    this.worker.terminate();
+    this.worker = null;
+    for (const p of this.pending.values()) p.reject(new Error("fly worker restarted"));
+    this.pending.clear();
   }
 
   async bestMove(fen: string, historyUci: string[]): Promise<EngineMove | null> {

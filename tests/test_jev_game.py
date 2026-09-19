@@ -92,14 +92,14 @@ def test_game_record_writes_pgn(tmp_path: Path):
             "pgn": "1. e4 c5 2. d4",
             "result": "1/2-1/2",
             "white": "Jev",
-            "black": "Fly",
+            "black": "Fruit Fly",
             "reason": "plycap",
         },
     )
     assert r.status_code == 200, r.text
     text = (dest / "latest.pgn").read_text(encoding="utf-8")
     assert '[White "Jev"]' in text
-    assert '[Black "Fly"]' in text
+    assert '[Black "Fruit Fly"]' in text
     assert "1. e4 c5 2. d4" in text
     assert '[White "?"]' not in text
     nested = c.post(
@@ -107,13 +107,14 @@ def test_game_record_writes_pgn(tmp_path: Path):
         json={
             "pgn": '[White "?"]\n\n1. e4 d5 2. exd5',
             "white": "Jev",
-            "black": "Fly",
+            "black": "Fruit Fly",
             "result": "1/2-1/2",
         },
     )
     assert nested.status_code == 200
     nested_text = (dest / "latest.pgn").read_text(encoding="utf-8")
     assert '[White "Jev"]' in nested_text
+    assert '[Black "Fruit Fly"]' in nested_text
     assert '[White "?"]' not in nested_text
     empty = c.post("/api/game-record", json={"pgn": "  "})
     assert empty.status_code == 400

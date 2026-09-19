@@ -48,7 +48,7 @@ class GameRecord(BaseModel):
     pgn: str
     result: str | None = None
     white: str = "Jev"
-    black: str = "Fly"
+    black: str = "Fruit Fly"
     reason: str | None = None
 
 

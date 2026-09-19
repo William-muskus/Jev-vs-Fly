@@ -511,7 +511,7 @@ single `16rem` column, the point at which the labels can no longer hold one line
 
 **Field tally** (`.mc-tally`, `FieldTally` in `Hud.tsx`). One row per army under the turn slate:
 crest, figures **lost**, time **on the field**, with the battle's total in the header. A stacked
-`.mc-tally-clock` bar splits that total between Ivory and Obsidian; each row also fills a
+`.mc-tally-clock` bar splits that total between the two players (Jev and Fruit Fly in a match); each row also fills a
 `.mc-tally-meter` against the longer of the two clocks so the leader sits at 100% and the trailer
 grows as it thinks. The row for the army on the move is lit — full opacity, a wash and an inset
 hairline in its own azure/ember — so the panel shows whose meter runs without another label, and a

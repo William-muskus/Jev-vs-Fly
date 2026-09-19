@@ -511,7 +511,7 @@
 
 .mc-tally {
   --mc-tally-accent: rgba(216, 177, 99, 0.28);
-  width: 12.4rem;
+  width: 13.6rem;
   padding: 0.34rem 0.5rem 0.4rem;
   border-radius: 3px;
   animation: mc-fade 420ms ease both;
@@ -540,7 +540,7 @@
   font-variant-numeric: tabular-nums;
 }
 
-/* Split of total thinking time: azure (Ivory / Jev) then ember (Obsidian / Fly). */
+/* Split of total thinking time: White's player (azure) then Black's (ember). */
 .mc-tally-clock {
   display: flex;
   height: 0.4rem;
@@ -605,9 +605,8 @@
 
 .mc-tally-name {
   font-family: "Cinzel", Georgia, serif;
-  font-size: 0.56rem;
-  letter-spacing: 0.13em;
-  text-transform: uppercase;
+  font-size: 0.62rem;
+  letter-spacing: 0.04em;
   color: #e3d2ad;
   white-space: nowrap;
   overflow: hidden;
@@ -676,7 +675,7 @@
 
 @media (max-width: 600px) {
   .mc-tally {
-    width: 11.2rem;
+    width: 12.4rem;
     padding: 0.28rem 0.42rem 0.32rem;
   }
 

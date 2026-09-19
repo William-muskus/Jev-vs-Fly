@@ -42,7 +42,6 @@ import { Chess } from '../vendor/chess.js';
 import * as enc from './encoding.js';
 import { loadBrain } from './loader.js';
 import { FlyBrain, policyForLegal, sampleIndex, topK } from './flybrain.js';
-import { FlyBrainGPU } from './flybrain-gpu.js';
 import { runMCTSAsync, uciOf } from './mcts.js';
 
 const SAMPLE_N = 2048;
@@ -128,8 +127,12 @@ async function handleLoad(msg) {
   gpuError = null;
   if (msg.gpu === false) gpuError = 'disabled by request';
   else {
-    // a stalled adapter/device request must not hold up 'ready': give WebGPU a bounded time
+    // a stalled adapter/device request must not hold up 'ready': give WebGPU a bounded time.
+    // Import only when asked — compiling the GPU module on a machine whose GPU process is
+    // already unhappy (Windows + the hall's WebGL context) used to kill this worker before
+    // 'load' could even answer, which the hall surfaces as "fly worker crashed".
     let timer = 0;
+    const { FlyBrainGPU } = await import('./flybrain-gpu.js');
     const creation = FlyBrainGPU.create(model);
     const timeout = new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(`WebGPU setup took longer than ${GPU_SETUP_TIMEOUT_MS} ms`)), GPU_SETUP_TIMEOUT_MS); });
     try { gpu = await Promise.race([creation, timeout]); }

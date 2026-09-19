@@ -314,14 +314,14 @@ export function Hud({
                 ms={snapshot.clock.whiteMs}
                 initial={snapshot.clock.initialMs}
                 active={snapshot.turn === "w" && snapshot.status === "playing"}
-                faction="w"
+                name={sideName(snapshot, "w")}
               />
               <div className="h-6 w-px bg-[#8a652244]" />
               <ClockFace
                 ms={snapshot.clock.blackMs}
                 initial={snapshot.clock.initialMs}
                 active={snapshot.turn === "b" && snapshot.status === "playing"}
-                faction="b"
+                name={sideName(snapshot, "b")}
               />
             </div>
           ) : null}
@@ -743,9 +743,9 @@ function FieldTally({ snapshot, getElapsed }: { snapshot: GameSnapshot; getElaps
 }
 
 /**
- * Stacked share of the battle clock: Ivory (Jev) from the left, Obsidian (Fly)
- * from the right of that. There is no time control to drain, so the bar is the
- * split of total thinking time, not a countdown.
+ * Stacked share of the battle clock: White's player from the left, Black's from
+ * the right. There is no time control to drain, so the bar is the split of total
+ * thinking time, not a countdown.
  */
 function ClockDuel({
   whiteName,
@@ -845,19 +845,19 @@ function ClockFace({
   ms,
   initial,
   active,
-  faction,
+  name,
 }: {
   ms: number;
   initial: number;
   active: boolean;
-  faction: "w" | "b";
+  name: string;
 }) {
   const urgent = ms < 30_000;
   return (
     <div className="flex items-center gap-1.5" style={{ opacity: active ? 1 : 0.55 }}>
       <Hourglass ratio={initial > 0 ? ms / initial : 0} urgent={urgent} />
       <div>
-        <p className="mc-display text-[0.5rem] tracking-[0.2em] text-[#a89268]">{faction === "w" ? "IVORY" : "OBSIDIAN"}</p>
+        <p className="mc-display text-[0.5rem] tracking-[0.12em] text-[#a89268]">{name}</p>
         <p className={`mc-display text-sm ${urgent ? "text-[#ff8f7d]" : "text-[#f2e2bd]"}`}>{formatClock(ms)}</p>
       </div>
     </div>
