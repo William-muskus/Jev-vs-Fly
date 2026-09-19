@@ -94,11 +94,23 @@ The first load fetches ~30 MB of fly brain into `game/.model-cache/` (gitignored
 from [cesp99/fly-chess](https://huggingface.co/cesp99/fly-chess) and serves it
 same-origin so the worker does not trip Hugging Face CORS.
 
-If the hall says **Could not load the fly brain** / **fly worker crashed**, the
-Python API is usually not running (or died). Keep `python -m game.server` up in
-the venv, then click **Jev vs Fly** again (or hard-reload). The 3D hall uses the
-plain-JS connectome engine so it does not fight the board's WebGL context;
-`?flyGpu=1` turns WebGPU back on.
+If the hall says **Could not load the fly brain** / **fly worker crashed** while
+this window already shows `GET /health` and `GET /model/brain.json` as 200, the
+Python API is fine — the fly *worker script* is not. On Windows, `game/medieval/public/engine`
+is often a broken git symlink (a path, not JavaScript). In `game/medieval`:
+
+```powershell
+npm run sync-engine
+# then Ctrl+C the hall and start it again
+npm run dev
+```
+
+Hard-reload the browser (Ctrl+Shift+R). You should then see `GET /model/brain.flyb`
+(or `.gz`) in this window as the ~30 MB blob downloads. `npm run sync-engine`
+also runs automatically as `predev` / `prebuild`.
+
+If `/health` itself fails (Vite `ECONNREFUSED :8766`), keep `python -m game.server`
+up in the venv, then click **Jev vs Fly** or Take the field again.
 
 ## Your Cults STLs (on your computer)
 

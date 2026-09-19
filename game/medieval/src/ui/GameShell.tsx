@@ -1005,7 +1005,7 @@ export function GameShell() {
         ) : null}
 
         {notice ? (
-          <div className="mc-fade mc-slate pointer-events-none absolute bottom-20 left-1/2 max-w-lg -translate-x-1/2 px-4 py-2 text-center text-xs text-[#e4d3ac]">
+          <div className="mc-fade mc-slate pointer-events-auto absolute bottom-16 left-1/2 z-30 w-[min(36rem,calc(100%-2rem))] -translate-x-1/2 px-4 py-3 text-center text-sm leading-relaxed text-[#e4d3ac]">
             {notice}
           </div>
         ) : null}

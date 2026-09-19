@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { explainFlyLoadFailure, flyGpuEnabled, flyWorkerCrashMessage, isFlyWorkerCrash } from "./flyLoad";
+import { explainFlyLoadFailure, flyGpuEnabled, flyWorkerCrashMessage, isFlyWorkerCrash, isFlyWorkerScript } from "./flyLoad";
 
 describe("flyGpuEnabled", () => {
   it("keeps WebGPU off on default autoplay", () => {
@@ -36,6 +36,21 @@ describe("explainFlyLoadFailure", () => {
 
   it("tells the user to retry after a dead worker", () => {
     expect(isFlyWorkerCrash(new Error("fly worker crashed"))).toBe(true);
-    expect(explainFlyLoadFailure(new Error("fly worker crashed"))).toMatch(/python -m game\.server/);
+    expect(explainFlyLoadFailure(new Error("fly worker crashed"))).toMatch(/sync-engine/);
+  });
+
+  it("does not blame the Python API when the worker file is a path", () => {
+    expect(explainFlyLoadFailure(new Error("Unexpected token '.' in /engine/worker.js:1"))).toMatch(/sync-engine/);
+    expect(explainFlyLoadFailure(new Error("Unexpected token '.' in /engine/worker.js:1"))).not.toMatch(/python -m game\.server/);
+  });
+});
+
+describe("isFlyWorkerScript", () => {
+  it("accepts the real worker module", () => {
+    expect(isFlyWorkerScript("// worker.js — Web Worker\nimport { Chess } from '../vendor/chess.js';\n")).toBe(true);
+  });
+
+  it("rejects a Windows git-symlink path file", () => {
+    expect(isFlyWorkerScript("../../../../web/engine/worker.js\n")).toBe(false);
   });
 });
