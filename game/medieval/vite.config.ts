@@ -33,6 +33,7 @@ export default defineConfig(({ mode }) => ({
   server: {
     host: "127.0.0.1",
     port: 8080,
+    open: "/?autoplay=1",
     hmr: {
       overlay: false,
     },

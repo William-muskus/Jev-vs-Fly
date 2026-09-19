@@ -44,6 +44,9 @@ npm install
 npm run dev
 ```
 
+`npm run dev` opens http://127.0.0.1:8080/?autoplay=1 (Jev vs Fly). Leave
+`python -m game.server` running in the other window.
+
 Wizard chess: http://127.0.0.1:8080/?autoplay=1
 Classic 2D: http://127.0.0.1:8766/
 
