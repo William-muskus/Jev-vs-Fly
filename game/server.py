@@ -157,6 +157,9 @@ def create_app(
         app.mount("/vendor", StaticFiles(directory=str(WEB / "vendor")), name="vendor")
     if (WEB / "assets").is_dir():
         app.mount("/assets", StaticFiles(directory=str(WEB / "assets")), name="assets")
+    wizard_models = Path(__file__).resolve().parent / "medieval" / "public" / "models"
+    if wizard_models.is_dir():
+        app.mount("/models", StaticFiles(directory=str(wizard_models)), name="wizard-models")
 
     return app
 

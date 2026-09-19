@@ -63,3 +63,10 @@ def test_cors_allows_the_vite_hall():
     r = c.get("/health", headers={"Origin": "http://127.0.0.1:8080"})
     assert r.status_code == 200
     assert r.headers.get("access-control-allow-origin") == "*"
+
+
+def test_wizard_manifest_is_served():
+    c = client()
+    r = c.get("/models/wizard/manifest.json")
+    assert r.status_code == 200, r.text
+    assert "kinds" in r.json()
