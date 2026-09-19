@@ -620,7 +620,7 @@ export class Dressing {
 
   applyQuality(preset: QualityPreset): void {
     const settings = QUALITY_SETTINGS[preset];
-    this.density = preset === "low" ? 0.42 : preset === "medium" ? 0.7 : preset === "high" ? 0.9 : 1;
+    this.density = preset === "low" ? 0.18 : preset === "medium" ? 0.7 : preset === "high" ? 0.9 : 1;
     this.propsAllowed = settings.battleProps;
     // Re-stage so every count and visibility flag is derived in one place.
     this.applyArena(this.look);

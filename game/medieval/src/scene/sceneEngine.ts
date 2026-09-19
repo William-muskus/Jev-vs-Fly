@@ -1248,7 +1248,8 @@ export class SceneEngine {
 
   private frame(): void {
     const now = performance.now();
-    const delta = Math.min(0.05, Math.max(0, (now - this.lastFrameTime) / 1000));
+    const rawDelta = Math.max(0, (now - this.lastFrameTime) / 1000);
+    const delta = Math.min(0.05, rawDelta);
     this.lastFrameTime = now;
     this.elapsed += delta;
 
@@ -1291,7 +1292,7 @@ export class SceneEngine {
     this.camera.position.sub(this.shake.offset);
 
     this.guardAgainstBlackFrames();
-    this.sampleFps(delta);
+    this.sampleFps(rawDelta);
   }
 
   /**

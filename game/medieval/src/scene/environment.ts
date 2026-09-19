@@ -378,6 +378,12 @@ export class CastleHall {
     }
     for (const shaft of this.shafts) shaft.visible = settings.lightShafts;
     this.buildParticles(settings.dustCount, settings.emberCount);
+    // Four fill PointLights make every standard material pay for extra
+    // fragments. Low keeps the bowls and flames, not the lights.
+    for (const torch of this.torches) {
+      torch.light.visible = preset !== "low";
+      if (preset === "low") torch.light.intensity = 0;
+    }
   }
 
   /**
