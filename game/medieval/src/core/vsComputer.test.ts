@@ -41,7 +41,7 @@ describe("vs computer custom movers", () => {
 
     await controller.tryMove("e2", "e4");
     await waitFor(
-      () => controller.getSnapshot().history.length === 2 && !controller.getSnapshot().thinking,
+      () => controller.getSnapshot().sanList.length >= 2 && !controller.getSnapshot().thinking,
     );
 
     expect(fens).toHaveLength(1);
