@@ -27,8 +27,10 @@ import {
 } from "lucide-react";
 
 import type { ElapsedState, Faction, GameSnapshot, LedgerMove, PieceKind } from "../core/types";
+import type { FlyAnatomy, FlyThought } from "../ai/flyAnatomy";
 import type { CameraPreset, ShowcaseCamera } from "../scene/sceneEngine";
 import { clockFillPercent, clockShare } from "./clockFill";
+import { FlyBrainView } from "./FlyBrainView";
 import { Crest, Hourglass, pieceGlyph } from "./Heraldry";
 import { useHasKeyboard } from "./inputMode";
 import { MoveLedger } from "./MoveLedger";
@@ -59,6 +61,10 @@ interface HudProps {
   onToggleCinema: () => void;
   /** Live per-side elapsed time, read on the tally's own tick. */
   getElapsed: () => ElapsedState;
+  /** Fruit Fly connectome sample; omitted unless this is a Jev vs Fly match. */
+  flyAnatomy?: FlyAnatomy | null;
+  flyThought?: FlyThought | null;
+  flyThinking?: boolean;
 }
 
 const DEMO_SPEEDS: { label: string; value: number }[] = [
@@ -159,6 +165,9 @@ export function Hud({
   onShowcaseCamera,
   onToggleCinema,
   getElapsed,
+  flyAnatomy = null,
+  flyThought = null,
+  flyThinking = false,
 }: HudProps) {
   const railRoom = useRoomForRail();
   /** Key hints are printed only where there are keys to press. */
@@ -305,6 +314,7 @@ export function Hud({
           </div>
 
           <FieldTally snapshot={snapshot} getElapsed={getElapsed} />
+          {flyAnatomy ? <FlyBrainView anatomy={flyAnatomy} thought={flyThought} thinking={flyThinking} /> : null}
         </div>
 
         <div className="pointer-events-auto flex flex-wrap items-center justify-end gap-1.5">

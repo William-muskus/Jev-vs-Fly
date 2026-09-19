@@ -61,7 +61,9 @@ tallest axis onto +Y so they stand **perpendicular**. Facing is `wizardYaw=0`
 feet on the tile and centres the sculpt (the tip alone used to leave a Y/Z
 shift). Fine-tune with `?wizardLift=0.1` (up) and `?wizardPush=-0.2` (along
 the file). The field tally under the turn slate now draws a stacked Jev|Fly
-clock bar plus a filling meter per army (elapsed wall time, not a countdown).
+clock bar plus a filling meter per army (elapsed wall time, not a countdown),
+and a live FlyWire canvas that replays Fruit Fly's neuron activity as it
+thinks.
 `speed` scales think
 time *and* smash beats (try `speed=4` so a full game is watchable).
 `flyGpu=1` lets the connectome worker use WebGPU (off by default).

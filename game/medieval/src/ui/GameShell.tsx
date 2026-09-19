@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 
 import { ARMY_SKINS, DEFAULT_ARMY_SKINS, type ArmySkinId } from "../assets/generated";
-import { flyClient } from "../ai/flyClient";
+import { flyClient, type FlyAnatomy, type FlyThought } from "../ai/flyClient";
 import { jevBestMove } from "../ai/jevClient";
 import { audio } from "../audio/audioManager";
 import {
@@ -266,6 +266,9 @@ export function GameShell() {
   const [cinema, setCinema] = useState(false);
   /** How the camera behaves during a showcase duel: held, orbiting or following. */
   const [showcaseCamera, setShowcaseCamera] = useState<ShowcaseCamera>("follow");
+  const [flyAnatomy, setFlyAnatomy] = useState<FlyAnatomy | null>(null);
+  const [flyThought, setFlyThought] = useState<FlyThought | null>(null);
+  const [flyThinking, setFlyThinking] = useState(false);
 
   // ------------------------------------------------------------ boot the scene
   useEffect(() => {
@@ -465,6 +468,10 @@ export function GameShell() {
     const maxPlies = Number.isFinite(maxPliesRaw) && maxPliesRaw > 0 ? maxPliesRaw : 80;
     const cinematics = params.get("cinematics") !== "0";
     flyClient.difficulty = flyDiff;
+    flyClient.onAnatomy = setFlyAnatomy;
+    flyClient.onThought = setFlyThought;
+    flyClient.onThinking = setFlyThinking;
+    if (flyClient.anatomy) setFlyAnatomy(flyClient.anatomy);
     try {
       await flyClient.load("/model/");
     } catch (err) {
@@ -581,6 +588,12 @@ export function GameShell() {
     engine?.setPlaybackRate(1);
     engine?.setCameraPreset("cinematic");
     setCinema(false);
+    setFlyAnatomy(null);
+    setFlyThought(null);
+    setFlyThinking(false);
+    flyClient.onAnatomy = null;
+    flyClient.onThought = null;
+    flyClient.onThinking = null;
     setPhase("menu");
   }, [controller]);
 
@@ -823,6 +836,9 @@ export function GameShell() {
             onShowcaseCamera={handleShowcaseCamera}
             onToggleCinema={() => setCinema(true)}
             getElapsed={getElapsed}
+            flyAnatomy={flyAnatomy}
+            flyThought={flyThought}
+            flyThinking={flyThinking}
           />
         ) : null}
 

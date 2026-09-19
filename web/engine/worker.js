@@ -311,6 +311,11 @@ async function handleMove(msg) {
   const act = activitySample(res.activity);
   const retinaDrive = res.retinaDrive ? Float32Array.from(res.retinaDrive) : null;   // the engines reuse the view
   const trace = msg.trace ? res.trace : null;
+  // Stream the first look at the board before lookahead / MCTS finishes, so the
+  // hall can replay neuron activity while Fruit Fly is still choosing.
+  if (msg.trace && (act || trace)) {
+    self.postMessage({ type: 'thought', id: msg.id, activitySample: act, trace, traceSteps: brain.steps });
+  }
   let chosen, value = res.value, sims = 0, note = '';
 
   if (cfg.kind === 'sample') {

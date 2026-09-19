@@ -1,4 +1,5 @@
 import type { EngineMove } from "./aiClient";
+import { flyAnatomyFromReady, flyThoughtFromReply, type FlyAnatomy, type FlyThought } from "./flyAnatomy";
 import {
   explainFlyLoadFailure,
   flyGpuEnabled,
@@ -8,12 +9,24 @@ import {
 } from "./flyLoad";
 import type { PieceKind, SquareId } from "../core/types";
 
+export type { FlyAnatomy, FlyThought } from "./flyAnatomy";
+
 type FlyDifficulty = "larva" | "fly" | "superfly";
 
 interface FlyReply {
   type: string;
+  id?: number;
   move?: string | null;
   message?: string;
+  done?: number;
+  total?: number;
+  activitySample?: Float32Array | null;
+  trace?: Float32Array | null;
+  traceSteps?: number;
+  sample?: FlyAnatomy["sample"];
+  silhouette?: FlyAnatomy["silhouette"];
+  legend?: string[];
+  features?: { steps?: number };
 }
 
 const LOAD_TIMEOUT_MS = 180_000;
@@ -28,6 +41,10 @@ export class FlyClient {
   private nextId = 1;
   private pending = new Map<number, { resolve: (v: FlyReply) => void; reject: (e: Error) => void }>();
   difficulty: FlyDifficulty = "fly";
+  anatomy: FlyAnatomy | null = null;
+  onAnatomy: ((anatomy: FlyAnatomy) => void) | null = null;
+  onThought: ((thought: FlyThought) => void) | null = null;
+  onThinking: ((thinking: boolean) => void) | null = null;
 
   load(baseUrl = "/model/"): Promise<void> {
     if (!this.ready) {
@@ -63,8 +80,13 @@ export class FlyClient {
         reject(new Error("fly brain load timed out"));
       }, LOAD_TIMEOUT_MS);
       this.pending.set(0, {
-        resolve: () => {
+        resolve: (msg) => {
           clearTimeout(timer);
+          const anatomy = flyAnatomyFromReady(msg);
+          if (anatomy) {
+            this.anatomy = anatomy;
+            this.onAnatomy?.(anatomy);
+          }
           resolve();
         },
         reject: (err) => {
@@ -74,9 +96,18 @@ export class FlyClient {
       });
       const worker = new Worker("/engine/worker.js", { type: "module", name: "fly-brain" });
       this.worker = worker;
-      worker.onmessage = (ev: MessageEvent<FlyReply & { id?: number }>) => {
+      worker.onmessage = (ev: MessageEvent<FlyReply>) => {
         const msg = ev.data;
-        if (msg.type === "progress" || msg.type === "thinking" || msg.type === "backend") return;
+        if (msg.type === "progress" || msg.type === "backend") return;
+        if (msg.type === "thinking") {
+          this.onThinking?.(true);
+          return;
+        }
+        if (msg.type === "thought") {
+          const thought = flyThoughtFromReply(msg);
+          if (thought) this.onThought?.(thought);
+          return;
+        }
         if (msg.type === "ready") {
           const p = this.pending.get(0);
           this.pending.delete(0);
@@ -118,32 +149,55 @@ export class FlyClient {
   async bestMove(fen: string, historyUci: string[]): Promise<EngineMove | null> {
     await this.load();
     const id = this.nextId++;
-    const msg = await new Promise<FlyReply>((resolve, reject) => {
-      const timer = setTimeout(() => {
-        this.pending.delete(id);
-        reject(new Error("fly timed out"));
-      }, 90_000);
-      this.pending.set(id, {
-        resolve: (v) => {
-          clearTimeout(timer);
-          resolve(v);
-        },
-        reject: (e) => {
-          clearTimeout(timer);
-          reject(e);
-        },
-      });
-      this.worker!.postMessage({ type: "move", id, fen, moves: historyUci, difficulty: this.difficulty });
-    });
-    if (!msg.move) return null;
-    const uci = msg.move;
-    return {
-      from: uci.slice(0, 2) as SquareId,
-      to: uci.slice(2, 4) as SquareId,
-      promotion: (uci[4] as PieceKind | undefined) ?? null,
-      score: 0,
-      depth: 0,
+    this.onThinking?.(true);
+    let sawThought = false;
+    const prevThought = this.onThought;
+    this.onThought = (thought) => {
+      sawThought = true;
+      prevThought?.(thought);
     };
+    try {
+      const msg = await new Promise<FlyReply>((resolve, reject) => {
+        const timer = setTimeout(() => {
+          this.pending.delete(id);
+          reject(new Error("fly timed out"));
+        }, 90_000);
+        this.pending.set(id, {
+          resolve: (v) => {
+            clearTimeout(timer);
+            resolve(v);
+          },
+          reject: (e) => {
+            clearTimeout(timer);
+            reject(e);
+          },
+        });
+        this.worker!.postMessage({
+          type: "move",
+          id,
+          fen,
+          moves: historyUci,
+          difficulty: this.difficulty,
+          trace: true,
+        });
+      });
+      if (!sawThought) {
+        const thought = flyThoughtFromReply(msg);
+        if (thought) prevThought?.(thought);
+      }
+      if (!msg.move) return null;
+      const uci = msg.move;
+      return {
+        from: uci.slice(0, 2) as SquareId,
+        to: uci.slice(2, 4) as SquareId,
+        promotion: (uci[4] as PieceKind | undefined) ?? null,
+        score: 0,
+        depth: 0,
+      };
+    } finally {
+      this.onThought = prevThought;
+      this.onThinking?.(false);
+    }
   }
 }
 

@@ -657,6 +657,42 @@
   filter: brightness(1.18);
 }
 
+/* Fruit Fly connectome: sampled neurons glowing at their FlyWire positions. */
+.mc-fly-brain {
+  width: 13.6rem;
+  padding: 0.34rem 0.5rem 0.4rem;
+  border-radius: 3px;
+  animation: mc-fade 420ms ease both;
+}
+
+.mc-fly-brain-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.4rem;
+  font-family: "Cinzel", Georgia, serif;
+  font-size: 0.46rem;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: #9b8659;
+  padding-bottom: 0.22rem;
+  margin-bottom: 0.28rem;
+  border-bottom: 1px solid rgba(138, 101, 34, 0.3);
+}
+
+.mc-fly-brain-state {
+  letter-spacing: 0.12em;
+  color: #cbb68d;
+}
+
+.mc-fly-brain-canvas {
+  display: block;
+  width: 100%;
+  height: 9.6rem;
+  border-radius: 2px;
+  background: rgba(8, 6, 4, 0.55);
+}
+
 /* Rings the bell on a fresh burial: the count swells and flares ember once. */
 @keyframes mc-tally-toll {
   0% {
@@ -677,6 +713,14 @@
   .mc-tally {
     width: 12.4rem;
     padding: 0.28rem 0.42rem 0.32rem;
+  }
+
+  .mc-fly-brain {
+    width: 12.4rem;
+  }
+
+  .mc-fly-brain-canvas {
+    height: 7.2rem;
   }
 
   .mc-tally-row {

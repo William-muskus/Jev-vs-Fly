@@ -60,6 +60,9 @@ export default defineConfig({
     hmr: {
       overlay: false,
     },
+    fs: {
+      allow: [path.resolve(__dirname, "../..")],
+    },
     proxy: {
       "/api": pythonApiProxy(),
       // Trailing slash so `/models/wizard/*.glb` stays on Vite (public/), not the fly-brain proxy.

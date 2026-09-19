@@ -19,7 +19,8 @@
     "noFallthroughCasesInSwitch": false,
     "paths": {
       "@/*": ["./src/*"]
-    }
+    },
+    "allowJs": true
   },
   "include": ["src"]
 }
