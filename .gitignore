@@ -17,4 +17,5 @@ tests/vectors/model.json
 !.env.example
 game/.model-cache/
 game/medieval/public/models/wizard/*.glb
+game/medieval/public/models/wizard/manifest.json
 game/medieval/public/models/wizard/stl/

@@ -66,11 +66,11 @@ def test_cors_allows_the_vite_hall():
     assert r.headers.get("access-control-allow-origin") == "*"
 
 
-def test_wizard_manifest_is_served():
+def test_wizard_models_mount_is_served():
     c = client()
-    r = c.get("/models/wizard/manifest.json")
+    r = c.get("/models/wizard/README.txt")
     assert r.status_code == 200, r.text
-    assert "kinds" in r.json()
+    assert b"not shipped" in r.content.lower() or b"Cults" in r.content
 
 
 def test_parse_serve_args(monkeypatch):

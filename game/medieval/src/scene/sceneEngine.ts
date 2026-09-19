@@ -949,6 +949,7 @@ export class SceneEngine {
   private wantedSkins: Record<Faction, ArmySkinId> | null = null;
   /** True while the sculpts are being swapped, so requests queue instead of racing. */
   private swappingArmies = false;
+  private armyWait: Promise<void> | null = null;
   private promotionGroup: THREE.Group | null = null;
   private promotionViews: PieceView[] = [];
   private promotionSlots: PromotionSlot[] = [];
@@ -5024,9 +5025,13 @@ export class SceneEngine {
    * a template about to be freed), the new rosters load, and the board is stood
    * back up. A request arriving during a swap replaces the pending one.
    */
-  setArmySkins(skins: Record<Faction, ArmySkinId>): void {
+  setArmySkins(skins: Record<Faction, ArmySkinId>): Promise<void> {
     this.wantedSkins = { w: skins.w, b: skins.b };
-    void this.syncArmies();
+    if (this.armyWait) return this.armyWait;
+    this.armyWait = this.syncArmies().finally(() => {
+      this.armyWait = null;
+    });
+    return this.armyWait;
   }
 
   /** The army each side is currently mustering. */

@@ -96,6 +96,12 @@ That writes six meshes the hall can load:
 
 `game/medieval/public/models/wizard/{k,q,b,n,r,p}.glb`
 
-Reload `http://127.0.0.1:8080/?autoplay=1`. The stone Staunton set is replaced
-by your sculpts. If conversion is skipped, the hall keeps the procedural army —
-the match still plays.
+Reload `http://127.0.0.1:8080/?autoplay=1` **after** converting (a hard refresh). The
+hall now sniffs `k.glb`…`p.glb` themselves — do not let `git pull` talk you
+into thinking the conversion failed. `manifest.json` is gitignored; an empty
+copy used to ship in git and wipe the converter’s list.
+
+You should see the Cults characters, not gothic-Staunton silhouettes. A banner
+on the hall reports `Loaded 6/6 local wizard sculpts`. If it says the stone
+army is standing in, the GLBs are not on that machine (the cloud recording
+never has them — they are private-use and not in the repo).

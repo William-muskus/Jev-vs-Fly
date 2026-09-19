@@ -17,6 +17,7 @@ import { Clapperboard } from "lucide-react";
 import { ARENA_LOOKS, DEFAULT_ARENA } from "../scene/arena";
 import { detectQualityPreset, type QualityPreset } from "../scene/quality";
 import { SceneEngine, type CameraPreset, type ShowcaseCamera } from "../scene/sceneEngine";
+import { wizardGlbKinds } from "../scene/wizardRoster";
 import { GameOverModal } from "./GameOverModal";
 import { Hud } from "./Hud";
 import { useHasKeyboard } from "./inputMode";
@@ -218,7 +219,13 @@ export function GameShell() {
 
   const detected = useMemo<QualityPreset>(() => detectQualityPreset(), []);
   const initialRender = useMemo<RenderPrefs>(() => loadRenderPrefs(), []);
-  const initialArmies = useMemo<Record<Faction, ArmySkinId>>(() => loadArmyPrefs(), []);
+  const initialArmies = useMemo<Record<Faction, ArmySkinId>>(() => {
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("autoplay") === "1" || params.get("jevfly") === "1") {
+      return { w: "wizard", b: "wizard" };
+    }
+    return loadArmyPrefs();
+  }, []);
   const initialSeatSwing = useMemo<boolean>(() => loadSeatSwing(), []);
   const initialPremoves = useMemo<boolean>(() => loadPremoves(), []);
   const initialPremoveDepth = useMemo<number>(() => loadPremoveDepth(), []);
@@ -503,10 +510,19 @@ export function GameShell() {
     engine?.setAttract(false);
     engine?.setInteractive(false);
     engine?.setArena("dusk");
-    engine?.setArmySkins(wizardSkins);
+    if (engine) await engine.setArmySkins(wizardSkins);
     engine?.setCaptureCinematics(cinematics);
     engine?.setPlaybackRate(speed);
     engine?.setShowcase(true, showcaseCamera);
+    const kinds = await wizardGlbKinds();
+    if (kinds.size === 0) {
+      setNotice(
+        "No local Cults GLBs here — this is the stone army. On your PC run python -m game.wizard_assets then reload.",
+      );
+    } else {
+      setNotice(`Loaded ${kinds.size}/6 local wizard sculpts.`);
+      setTimeout(() => setNotice(null), 6000);
+    }
     controller.start({
       mode: "demo",
       difficulty: "medium",

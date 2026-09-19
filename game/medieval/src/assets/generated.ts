@@ -553,7 +553,7 @@ export const ARMY_SKINS: Record<ArmySkinId, ArmySkin> = {
   wizard: {
     id: "wizard",
     label: "Enchanted Stone",
-    blurb: "Wizard chess — living marble and obsidian. They smash whoever they take.",
+    blurb: "Wizard chess. Local Cults GLBs if you converted them; otherwise living marble.",
     ranks: { k: "King", q: "Queen", b: "Bishop", n: "Knight", r: "Rook", p: "Pawn" },
     arsenal: "none",
     native: "w",
