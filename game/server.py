@@ -95,7 +95,13 @@ def _write_pgn(records_dir: Path, req: GameRecord) -> Path:
         headers.append(f'[Result "{req.result}"]')
     if req.reason:
         headers.append(f'[Termination "{req.reason}"]')
-    text = "\n".join(headers) + "\n\n" + req.pgn.strip() + "\n"
+    body: list[str] = []
+    for line in req.pgn.splitlines():
+        if line.startswith("["):
+            continue
+        body.append(line)
+    movetext = "\n".join(body).strip()
+    text = "\n".join(headers) + "\n\n" + movetext + "\n"
     dest = records_dir / "latest.pgn"
     dest.write_text(text, encoding="utf-8")
     try:
