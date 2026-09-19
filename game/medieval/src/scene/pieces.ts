@@ -18,7 +18,7 @@ import { factionRingTexture, radialTexture } from "./textures";
 import { Ease, type TweenManager } from "./tween";
 import { armSculptWarmJobs, attachWeapons, type AttachedArms } from "./weapons";
 import { buildWizardChessPiece } from "./wizardPieces";
-import { wizardGlbKinds } from "./wizardRoster";
+import { wizardGlbKinds, wizardYawRadians } from "./wizardRoster";
 
 /**
  * Rendered height (world units, 1 unit = 1 board square) per piece kind.
@@ -1960,6 +1960,7 @@ export class PieceFactory {
       if (kinds.has(kind)) {
         try {
           const gltf = await loadGltf(this.loader, `/models/wizard/${kind}.glb`, 1);
+          gltf.scene.rotateY(wizardYawRadians());
           return this.normalize(gltf.scene, kind, {}, false, skin.arsenal);
         } catch (error) {
           console.warn(`[pieces] wizard GLB for ${kind} failed, using stone`, error);

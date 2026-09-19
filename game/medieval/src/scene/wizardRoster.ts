@@ -40,6 +40,19 @@ export function resetWizardRoster(): void {
 }
 
 /**
+ * Yaw applied to Cults GLBs so local +Z (the hall's "front") matches the sculpt.
+ * nbauchat's set faces the camera as exported; 180° turns them toward the enemy.
+ * Override live with `?wizardYaw=90` (degrees) without reconverting.
+ */
+export function wizardYawRadians(search = typeof window !== "undefined" ? window.location.search : ""): number {
+  const raw = new URLSearchParams(search).get("wizardYaw");
+  if (raw === null || raw === "") return Math.PI;
+  const deg = Number(raw);
+  if (!Number.isFinite(deg)) return Math.PI;
+  return (deg * Math.PI) / 180;
+}
+
+/**
  * Which converted wizard GLBs are actually being served.
  *
  * The tracked `manifest.json` used to list `kinds: []`, and `git pull` would

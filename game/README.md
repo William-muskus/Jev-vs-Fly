@@ -49,7 +49,7 @@ Classic 2D: http://127.0.0.1:8766/
 
 Query flags: `strategy=best_this_turn|best_win_rate|both_turn_then_win|both_win_then_turn`,
 `difficulty=larva|fly|superfly`, `jevColor=white|black`, `maxPlies=80`,
-`speed=1`, `cinema=1`, `cinematics=1`. `speed` scales think time *and* smash
+`speed=1`, `cinema=1`, `cinematics=1`, `wizardYaw=180`. `speed` scales think time *and* smash
 beats (try `speed=4` so a full game is watchable). `cinematics=0` skips the
 long capture camera work.
 
@@ -105,3 +105,7 @@ You should see the Cults characters, not gothic-Staunton silhouettes. A banner
 on the hall reports `Loaded 6/6 local wizard sculpts`. If it says the stone
 army is standing in, the GLBs are not on that machine (the cloud recording
 never has them — they are private-use and not in the repo).
+
+If the horses look at you instead of the far rank, the hall already yaws the
+meshes 180°. Try `?wizardYaw=90` or `?wizardYaw=0` if a different turn is right
+for your export — no need to reconvert.
