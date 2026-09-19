@@ -84,16 +84,18 @@ export function MainMenu({ onStart, onJevVsFly, onOpenSettings, muster, onMuster
             : "The pieces smash whoever they take. A decision model against a fruit-fly connectome."}
         </p>
         {onJevVsFly ? (
-          <button
-            type="button"
-            className="mc-menu-cta mt-5 inline-flex items-center gap-2 rounded-sm border border-[#c8ab74] bg-[#c8ab74]/15 px-5 py-2 text-sm tracking-[0.18em] text-[#f4e3bd]"
-            onClick={onJevVsFly}
-          >
-            <Swords size={16} /> Jev vs Fly
-          </button>
-          <p className="mt-2 text-xs italic text-[#9c8b6c]">
-            White is TypeSafe Jev. Black is the fly connectome. You watch.
-          </p>
+          <>
+            <button
+              type="button"
+              className="mc-menu-cta mt-5 inline-flex items-center gap-2 rounded-sm border border-[#c8ab74] bg-[#c8ab74]/15 px-5 py-2 text-sm tracking-[0.18em] text-[#f4e3bd]"
+              onClick={onJevVsFly}
+            >
+              <Swords size={16} /> Jev vs Fly
+            </button>
+            <p className="mt-2 text-xs italic text-[#9c8b6c]">
+              White is TypeSafe Jev. Black is the fly connectome. You watch.
+            </p>
+          </>
         ) : null}
       </div>
 
