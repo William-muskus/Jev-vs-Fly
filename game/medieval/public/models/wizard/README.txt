@@ -1,8 +1,9 @@
-Drop converted piece GLBs here as k.glb q.glb b.glb n.glb r.glb p.glb
+These meshes are not shipped in git.
 
-The nbauchat Cults set (harry-potter-chess) is private-use / no-AI and is not
-shipped in this repository. If you have the STLs locally:
+On the computer that already has the Cults STLs, from the repo root:
 
-    python -m game.wizard_assets --src /path/to/nbauchat/harry-potter-chess
+    pip install trimesh
+    python -m game.wizard_assets --src "C:\Users\Willi\Downloads\harry-potter-chess20241003-1-ye3pe1\nbauchat\harry-potter-chess"
 
-Until then the board builds original gothic-Staunton stone in the engine.
+That writes k.glb q.glb b.glb n.glb r.glb p.glb here. Reload the 3D hall.
+Until then the engine builds original gothic-Staunton stone.

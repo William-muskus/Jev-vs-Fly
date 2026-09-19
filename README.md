@@ -11,6 +11,9 @@ engine is unchanged. On top of it:
   the fly still runs in the browser from the published FlyWire blob. The 3D hall
   is King's Gambit; the pieces smash whoever they take.
 
+If you have nbauchat's Cults `.stl` files on your PC, convert them locally
+(do not commit them): see **Your Cults STLs** in [`game/README.md`](game/README.md).
+
 ```bash
 export TYPESAFE_API_KEY=…          # never commit this
 fly jev-compare                    # writes experiments/results/comparison.md

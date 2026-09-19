@@ -12,11 +12,9 @@ enchanted. A capture always destroys the piece that is taken — there is no
 combat roll — and the hall calls each move in English (*White knight to F3!*).
 
 The 3D hall is vendored from [King's Gambit](https://github.com/alexngdev99/rork-medieval-3d-chess)
-(MIT). The gothic-Staunton army is original. If you have nbauchat's Cults STLs
-locally (private-use, not redistributed here), convert them with
-`python -m game.wizard_assets` (searches known drop paths) or
-`python -m game.wizard_assets --src /path/to/nbauchat/harry-potter-chess`.
-They replace the procedural set via `public/models/wizard/manifest.json`.
+(MIT). The gothic-Staunton army is original. nbauchat's Cults STLs are
+**private-use / no-AI** and are not in this repo — convert them on your machine
+(see **Your Cults STLs** below).
 
 ```
   browser                         this server
@@ -47,3 +45,29 @@ from [cesp99/fly-chess](https://huggingface.co/cesp99/fly-chess) and serves it
 same-origin so the worker does not trip Hugging Face CORS.
 
 Classic 2D UI remains at `http://127.0.0.1:8766/`.
+
+## Your Cults STLs (on your computer)
+
+You already have the unzipped set. Do **not** commit the `.stl` files (or the
+`.glb` output) — they stay gitignored, private-use only.
+
+From the **repo root**, on the same machine as the STLs:
+
+```bash
+pip install trimesh
+python -m game.wizard_assets --src "C:\Users\Willi\Downloads\harry-potter-chess20241003-1-ye3pe1\nbauchat\harry-potter-chess"
+```
+
+If that folder is still in Downloads, this also works with no path:
+
+```bash
+python -m game.wizard_assets
+```
+
+That writes six meshes the hall can load:
+
+`game/medieval/public/models/wizard/{k,q,b,n,r,p}.glb`
+
+Reload `http://127.0.0.1:8080/?autoplay=1`. The stone Staunton set is replaced
+by your sculpts. If conversion is skipped, the hall keeps the procedural army —
+the match still plays.
