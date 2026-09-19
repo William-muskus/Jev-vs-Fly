@@ -21,6 +21,7 @@ import { wizardGlbKinds } from "../scene/wizardRoster";
 import { GameOverModal } from "./GameOverModal";
 import { Hud } from "./Hud";
 import { useHasKeyboard } from "./inputMode";
+import { cinemaEnabled } from "./jevflyFlags";
 import { MainMenu, type MatchConfig } from "./MainMenu";
 import type { MusterChoice } from "./Muster";
 import { SettingsPanel, type GameSettings } from "./SettingsPanel";
@@ -532,7 +533,7 @@ export function GameShell() {
       clockMinutes: null,
       demo: { white: "medium", black: "medium", speed, autoRematch: false },
     });
-    setCinema(params.get("cinema") !== "0");
+    setCinema(cinemaEnabled(window.location.search));
     setPhase("playing");
   }, [controller, showcaseCamera, stopAttract]);
 

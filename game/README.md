@@ -52,7 +52,8 @@ Classic 2D: http://127.0.0.1:8766/
 
 Query flags: `strategy=best_this_turn|best_win_rate|both_turn_then_win|both_win_then_turn`,
 `difficulty=larva|fly|superfly`, `jevColor=white|black`, `maxPlies=80`,
-`speed=1`, `cinema=1`, `cinematics=1`. Cults STLs are Z-up (print bed), so
+`speed=1`, `cinema=1` (hides the HUD; default is off so you see Jev vs Fly),
+`cinematics=1`. Cults STLs are Z-up (print bed), so
 without a tip they lie **parallel** to the board. The hall now rotates the
 tallest axis onto +Y so they stand **perpendicular**. Facing is `wizardYaw=0`
 (the default — you do not need the query flag). If a mesh still lies flat,
