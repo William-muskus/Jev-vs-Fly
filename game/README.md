@@ -60,6 +60,10 @@ tallest axis onto +Y so they stand **perpendicular**. Facing is `wizardYaw=0`
 time *and* smash beats (try `speed=4` so a full game is watchable).
 `cinematics=0` skips the long capture camera work.
 
+When a duel ends, the hall POSTs the PGN to `/api/game-record`. That writes
+`game/.records/latest.pgn` (gitignored) with White/Black tags so a live Jev vs
+Fly game is kept without a video.
+
 If `python -m game.server` dies with **WinError 10048** / *une seule utilisation
 de chaque adresse de socket*, port **8766 is already taken**. Usually the API
 from the first successful start is still running — leave it, and in a second

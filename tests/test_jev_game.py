@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -79,6 +81,28 @@ def test_parse_serve_args(monkeypatch):
     args = parse_args(["--port", "9001", "--host", "0.0.0.0"])
     assert args.port == 9001 and args.host == "0.0.0.0"
     assert parse_args([]).port == 8766
+
+
+def test_game_record_writes_pgn(tmp_path: Path):
+    dest = tmp_path / "records"
+    c = TestClient(create_app(system_one=Scripted("e2e4"), records_dir=dest))
+    r = c.post(
+        "/api/game-record",
+        json={
+            "pgn": "1. e4 c5 2. d4",
+            "result": "1/2-1/2",
+            "white": "Jev",
+            "black": "Fly",
+            "reason": "plycap",
+        },
+    )
+    assert r.status_code == 200, r.text
+    text = (dest / "latest.pgn").read_text(encoding="utf-8")
+    assert '[White "Jev"]' in text
+    assert '[Black "Fly"]' in text
+    assert "1. e4 c5 2. d4" in text
+    empty = c.post("/api/game-record", json={"pgn": "  "})
+    assert empty.status_code == 400
 
 
 def test_occupy_message_already_running():

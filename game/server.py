@@ -31,8 +31,10 @@ REPO = Path(__file__).resolve().parent.parent
 STATIC = Path(__file__).resolve().parent / "static"
 WEB = REPO / "web"
 CACHE = Path(__file__).resolve().parent / ".model-cache"
+RECORDS = Path(__file__).resolve().parent / ".records"
 HF_MODEL_BASE = "https://huggingface.co/cesp99/fly-chess/resolve/main/web/"
 MODEL_FILES = ("brain.json", "brain.flyb", "brain.flyb.gz")
+ARTIFACT_PGN = Path("/opt/cursor/artifacts/jev-vs-fly-latest.pgn")
 
 _cache_lock = threading.Lock()
 
@@ -40,6 +42,14 @@ _cache_lock = threading.Lock()
 class MoveRequest(BaseModel):
     fen: str
     strategy: str = "best_this_turn"
+
+
+class GameRecord(BaseModel):
+    pgn: str
+    result: str | None = None
+    white: str = "Jev"
+    black: str = "Fly"
+    reason: str | None = None
 
 
 def _ensure_model_file(name: str, model_dir: Path) -> Path:
@@ -74,10 +84,34 @@ def _ensure_model_file(name: str, model_dir: Path) -> Path:
         return dest
 
 
+def _write_pgn(records_dir: Path, req: GameRecord) -> Path:
+    records_dir.mkdir(parents=True, exist_ok=True)
+    headers = [
+        '[Event "Jev vs Fly wizard chess"]',
+        f'[White "{req.white}"]',
+        f'[Black "{req.black}"]',
+    ]
+    if req.result:
+        headers.append(f'[Result "{req.result}"]')
+    if req.reason:
+        headers.append(f'[Termination "{req.reason}"]')
+    text = "\n".join(headers) + "\n\n" + req.pgn.strip() + "\n"
+    dest = records_dir / "latest.pgn"
+    dest.write_text(text, encoding="utf-8")
+    try:
+        ARTIFACT_PGN.parent.mkdir(parents=True, exist_ok=True)
+        ARTIFACT_PGN.write_text(text, encoding="utf-8")
+    except OSError:
+        pass
+    print(f"Recorded game {req.white} vs {req.black}: {dest}", flush=True)
+    return dest
+
+
 def create_app(
     *,
     system_one: Callable[[Any, Mapping[str, Any]], Any] | None = None,
     model_dir: Path | None = None,
+    records_dir: Path | None = None,
 ) -> FastAPI:
     app = FastAPI(title="Jev vs Fly", version="0.1.0")
     app.add_middleware(
@@ -87,6 +121,7 @@ def create_app(
         allow_headers=["*"],
     )
     model_dir = Path(model_dir) if model_dir is not None else CACHE
+    records_dir = Path(records_dir) if records_dir is not None else RECORDS
 
     @app.get("/health")
     def health() -> dict[str, Any]:
@@ -127,6 +162,13 @@ def create_app(
             flush=True,
         )
         return JSONResponse(pick.to_json())
+
+    @app.post("/api/game-record")
+    def game_record(req: GameRecord) -> dict[str, Any]:
+        if not req.pgn.strip():
+            raise HTTPException(400, "empty PGN")
+        path = _write_pgn(records_dir, req)
+        return {"ok": True, "path": str(path)}
 
     @app.get("/model/{name}")
     def model_file(name: str) -> FileResponse:

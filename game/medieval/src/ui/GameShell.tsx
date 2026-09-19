@@ -547,6 +547,27 @@ export function GameShell() {
     }
   }, [phase, introPlaying, startJevVsFly]);
 
+  const recordedPgn = useRef<string | null>(null);
+  useEffect(() => {
+    if (snapshot.status === "playing") recordedPgn.current = null;
+    if (snapshot.status !== "over" || !snapshot.pgn) return;
+    if (recordedPgn.current === snapshot.pgn) return;
+    recordedPgn.current = snapshot.pgn;
+    const winner = snapshot.result?.winner;
+    const result = winner === "w" ? "1-0" : winner === "b" ? "0-1" : "1/2-1/2";
+    void fetch("/api/game-record", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        pgn: snapshot.pgn,
+        result,
+        white: snapshot.sideNames?.w ?? "Jev",
+        black: snapshot.sideNames?.b ?? "Fly",
+        reason: snapshot.result?.reason ?? null,
+      }),
+    }).catch(() => undefined);
+  }, [snapshot.status, snapshot.pgn, snapshot.result, snapshot.sideNames]);
+
   const returnToMenu = useCallback(() => {
     controller.stop();
     controller.clearMovers();
