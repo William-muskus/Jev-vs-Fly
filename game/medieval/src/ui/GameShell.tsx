@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties }
 import { ARMY_SKINS, DEFAULT_ARMY_SKINS, type ArmySkinId } from "../assets/generated";
 import { flyClient, type FlyAnatomy, type FlyThought } from "../ai/flyClient";
 import { jevBestMove } from "../ai/jevClient";
+import { addJevUsage, emptyJevUsage, type JevUsage } from "../ai/jevSpend";
 import { audio } from "../audio/audioManager";
 import {
   DEFAULT_PREMOVE_DEPTH,
@@ -21,7 +22,7 @@ import { wizardGlbKinds } from "../scene/wizardRoster";
 import { GameOverModal } from "./GameOverModal";
 import { Hud } from "./Hud";
 import { useHasKeyboard } from "./inputMode";
-import { cinemaEnabled, FLY_PLAYER_NAME, JEV_PLAYER_NAME, jevFlySideNames, qualityPresetFromSearch, vsComputerSideNames } from "./jevflyFlags";
+import { cinemaEnabled, FLY_PLAYER_NAME, JEV_PLAYER_NAME, jevFlySideNames, jevWasPlayer, qualityPresetFromSearch, vsComputerSideNames } from "./jevflyFlags";
 import { MainMenu, type MatchConfig } from "./MainMenu";
 import type { MusterChoice } from "./Muster";
 import { SettingsPanel, type GameSettings } from "./SettingsPanel";
@@ -100,13 +101,18 @@ function saveSeatSwing(enabled: boolean): void {
   }
 }
 
-function makeJevMover(strategy: string, setNotice: (msg: string | null) => void) {
+function makeJevMover(
+  strategy: string,
+  setNotice: (msg: string | null) => void,
+  onUsage: (usage: JevUsage) => void,
+) {
   return async (fen: string) => {
     try {
-      const move = await jevBestMove(fen, strategy);
-      if (!move) throw new Error("Jev returned no move");
+      const reply = await jevBestMove(fen, strategy);
+      if (!reply) throw new Error("Jev returned no move");
+      onUsage(reply.usage);
       setNotice(null);
-      return move;
+      return reply.move;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       setNotice(`Jev could not move: ${message}`);
@@ -302,6 +308,18 @@ export function GameShell() {
   const [flyAnatomy, setFlyAnatomy] = useState<FlyAnatomy | null>(null);
   const [flyThought, setFlyThought] = useState<FlyThought | null>(null);
   const [flyThinking, setFlyThinking] = useState(false);
+  const jevSpendRef = useRef(emptyJevUsage());
+  const [jevSpend, setJevSpend] = useState(emptyJevUsage());
+
+  const resetJevSpend = useCallback(() => {
+    jevSpendRef.current = emptyJevUsage();
+    setJevSpend(emptyJevUsage());
+  }, []);
+
+  const noteJevUsage = useCallback((usage: JevUsage) => {
+    jevSpendRef.current = addJevUsage(jevSpendRef.current, usage);
+    setJevSpend({ ...jevSpendRef.current });
+  }, []);
 
   // ------------------------------------------------------------ boot the scene
   useEffect(() => {
@@ -468,6 +486,7 @@ export function GameShell() {
       lastMatch.current = config;
       startingMatch.current = true;
       stopAttract();
+      resetJevSpend();
       void audio.unlock();
       audio.blip("press");
       controller.clearMovers();
@@ -516,7 +535,7 @@ export function GameShell() {
         } else {
           const strategy = new URLSearchParams(window.location.search).get("strategy") || "best_this_turn";
           controller.setMovers(
-            { [aiColor]: makeJevMover(strategy, setNotice) },
+            { [aiColor]: makeJevMover(strategy, setNotice, noteJevUsage) },
             vsComputerSideNames("jev", config.playerColor),
           );
         }
@@ -533,7 +552,7 @@ export function GameShell() {
       });
       setPhase("playing");
     },
-    [controller, showcaseCamera, stopAttract],
+    [controller, showcaseCamera, stopAttract, resetJevSpend, noteJevUsage],
   );
 
   const autoStarted = useRef(false);
@@ -542,6 +561,7 @@ export function GameShell() {
     lastMatch.current = null;
     startingMatch.current = true;
     stopAttract();
+    resetJevSpend();
     void audio.unlock();
     audio.blip("press");
     const params = new URLSearchParams(window.location.search);
@@ -567,7 +587,7 @@ export function GameShell() {
       return;
     }
     if (gen !== matchGen.current) return;
-    const jevMover = makeJevMover(strategy, setNotice);
+    const jevMover = makeJevMover(strategy, setNotice, noteJevUsage);
     const flyMover = makeFlyMover(setNotice);
     controller.setMovers(
       jevWhite
@@ -613,7 +633,7 @@ export function GameShell() {
     setCinema(cinemaEnabled(window.location.search));
     startingMatch.current = false;
     setPhase("playing");
-  }, [controller, showcaseCamera, stopAttract]);
+  }, [controller, showcaseCamera, stopAttract, resetJevSpend, noteJevUsage]);
 
   useEffect(() => {
     if (autoStarted.current) return;
@@ -665,8 +685,9 @@ export function GameShell() {
     flyClient.onAnatomy = null;
     flyClient.onThought = null;
     flyClient.onThinking = null;
+    resetJevSpend();
     setPhase("menu");
-  }, [controller]);
+  }, [controller, resetJevSpend]);
 
   // -------------------------------------------------------- showcase controls
   const handleTogglePause = useCallback(() => {
@@ -723,6 +744,7 @@ export function GameShell() {
     // `startMatch` would quietly demote the duel to a game against the computer.
     if (current.mode === "demo") {
       audio.blip("press");
+      resetJevSpend();
       controller.restartDemo();
       return;
     }
@@ -736,7 +758,7 @@ export function GameShell() {
         opponent: current.mode === "ai" ? "jev" : undefined,
       },
     );
-  }, [controller, startMatch]);
+  }, [controller, startMatch, resetJevSpend]);
 
   const handleFullscreen = useCallback(() => {
     const element = document.documentElement;
@@ -1000,6 +1022,8 @@ export function GameShell() {
                 : null
             }
             sideNames={snapshot.sideNames}
+            elapsed={snapshot.elapsed}
+            jevCost={jevWasPlayer(snapshot.sideNames) ? jevSpend : null}
             onRematch={handleRematch}
             onMenu={returnToMenu}
           />

@@ -6,6 +6,7 @@ import {
   HUMAN_PLAYER_NAME,
   JEV_PLAYER_NAME,
   jevFlySideNames,
+  jevWasPlayer,
   qualityPresetFromSearch,
   vsComputerSideNames,
 } from "./jevflyFlags";
@@ -46,5 +47,14 @@ describe("vsComputerSideNames", () => {
     expect(vsComputerSideNames("jev", "b")).toEqual({ w: JEV_PLAYER_NAME, b: HUMAN_PLAYER_NAME });
     expect(vsComputerSideNames("fly", "w")).toEqual({ w: HUMAN_PLAYER_NAME, b: FLY_PLAYER_NAME });
     expect(vsComputerSideNames("fly", "b")).toEqual({ w: FLY_PLAYER_NAME, b: HUMAN_PLAYER_NAME });
+  });
+});
+
+describe("jevWasPlayer", () => {
+  it("is true only when Jev sat on a banner", () => {
+    expect(jevWasPlayer({ w: "Jev", b: "Fruit Fly" })).toBe(true);
+    expect(jevWasPlayer({ w: "You", b: "Jev" })).toBe(true);
+    expect(jevWasPlayer({ w: "You", b: "Fruit Fly" })).toBe(false);
+    expect(jevWasPlayer(null)).toBe(false);
   });
 });

@@ -1,8 +1,10 @@
 import { useEffect, useRef, useState } from "react";
 import { Check, Copy, Home, PauseCircle, RotateCw, Swords } from "lucide-react";
 
+import { formatJevSpend, type JevUsage } from "../ai/jevSpend";
 import { DEMO_REMATCH_DELAY_MS } from "../core/gameController";
-import type { Difficulty, EndReason, Faction, GameResult } from "../core/types";
+import type { Difficulty, ElapsedState, EndReason, Faction, GameResult } from "../core/types";
+import { formatElapsed } from "./elapsedFormat";
 import { Crest } from "./Heraldry";
 
 /**
@@ -31,6 +33,10 @@ interface GameOverModalProps {
   moveCount: number;
   showcase?: ShowcaseOutcome | null;
   sideNames?: { w: string; b: string };
+  /** Frozen wall-clock per banner — the same meters the field tally ran. */
+  elapsed?: ElapsedState | null;
+  /** TypeSafe spend for the game. Omitted unless Jev sat on a banner. */
+  jevCost?: JevUsage | null;
   onRematch: () => void;
   onMenu: () => void;
 }
@@ -55,13 +61,17 @@ export function GameOverModal({
   moveCount,
   showcase,
   sideNames,
+  elapsed,
+  jevCost,
   onRematch,
   onMenu,
 }: GameOverModalProps) {
   const [copied, setCopied] = useState(false);
 
-  const whiteName = (sideNames?.w ?? "Ivory").toUpperCase();
-  const blackName = (sideNames?.b ?? "Obsidian").toUpperCase();
+  const whiteLabel = sideNames?.w ?? "Ivory";
+  const blackLabel = sideNames?.b ?? "Obsidian";
+  const whiteName = whiteLabel.toUpperCase();
+  const blackName = blackLabel.toUpperCase();
   const draw = result.winner === null;
   const playerWon = versusComputer && result.winner === playerColor;
   const headline = draw
@@ -120,7 +130,22 @@ export function GameOverModal({
             </p>
           ) : null}
 
-          <div className="mt-5 max-h-24 overflow-y-auto rounded-sm border border-[#8a652255] bg-[#00000010] p-3 text-left font-mono text-[0.7rem] leading-relaxed text-[#4a3a24]">
+          {elapsed ? (
+            <div className="mc-verdict-clocks">
+              <div className="mc-verdict-clock">
+                <span className="mc-verdict-clock-name">{whiteLabel}</span>
+                <span className="mc-verdict-clock-time">{formatElapsed(elapsed.whiteMs)}</span>
+              </div>
+              <div className="mc-verdict-clock">
+                <span className="mc-verdict-clock-name">{blackLabel}</span>
+                <span className="mc-verdict-clock-time">{formatElapsed(elapsed.blackMs)}</span>
+              </div>
+            </div>
+          ) : null}
+
+          {jevCost ? <p className="mc-verdict-jev">{formatJevSpend(jevCost)}</p> : null}
+
+          <div className="mt-5 max-h-40 overflow-y-auto rounded-sm border border-[#8a652255] bg-[#00000010] p-3 text-left font-mono text-[0.7rem] leading-relaxed text-[#4a3a24]">
             {pgn.length > 0 ? pgn : "1. (no moves)"}
           </div>
 

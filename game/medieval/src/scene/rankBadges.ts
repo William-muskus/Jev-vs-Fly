@@ -62,7 +62,7 @@ export const BADGE_SCALE: Record<PieceKind, number> = {
 };
 
 /** Height above the figure's crown where its badge floats. */
-export const BADGE_LIFT = 0.3;
+export const BADGE_LIFT = 0.45;
 
 function canvas2d(): { canvas: HTMLCanvasElement; ctx: CanvasRenderingContext2D } {
   const canvas = document.createElement("canvas");

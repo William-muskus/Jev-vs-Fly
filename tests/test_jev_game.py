@@ -37,6 +37,8 @@ def test_jev_move_from_startpos():
     body = r.json()
     assert body["uci"] == "e2e4" and body["san"] == "e4"
     assert body["played_question"] == "best_this_turn"
+    assert body["usage"]["input_tokens"] == 11
+    assert body["usage"]["output_tokens"] == 2
 
 
 def test_unknown_strategy_and_game_over():
@@ -101,6 +103,8 @@ def test_game_record_writes_pgn(tmp_path: Path):
     assert '[White "Jev"]' in text
     assert '[Black "Fruit Fly"]' in text
     assert "1. e4 c5 2. d4" in text
+    assert text.strip().endswith("1/2-1/2")
+    assert not text.rstrip().endswith("*")
     assert '[White "?"]' not in text
     nested = c.post(
         "/api/game-record",
@@ -116,6 +120,22 @@ def test_game_record_writes_pgn(tmp_path: Path):
     assert '[White "Jev"]' in nested_text
     assert '[Black "Fruit Fly"]' in nested_text
     assert '[White "?"]' not in nested_text
+    leftover = c.post(
+        "/api/game-record",
+        json={
+            "pgn": '[Event "?"]\n[White "?"]\n[Result "*"]\n\n1. e4 e5 32. Qg2# *',
+            "white": "Jev",
+            "black": "Fruit Fly",
+            "result": "0-1",
+            "reason": "checkmate",
+        },
+    )
+    assert leftover.status_code == 200
+    leftover_text = (dest / "latest.pgn").read_text(encoding="utf-8")
+    assert '[White "Jev"]' in leftover_text
+    assert '[Result "0-1"]' in leftover_text
+    assert leftover_text.strip().endswith("Qg2# 0-1")
+    assert "*" not in leftover_text.split("\n\n", 1)[-1]
     empty = c.post("/api/game-record", json={"pgn": "  "})
     assert empty.status_code == 400
 

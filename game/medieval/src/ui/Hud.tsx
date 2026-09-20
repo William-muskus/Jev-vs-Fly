@@ -30,6 +30,7 @@ import type { ElapsedState, Faction, GameSnapshot, LedgerMove, PieceKind } from 
 import type { FlyAnatomy, FlyThought } from "../ai/flyAnatomy";
 import type { CameraPreset, ShowcaseCamera } from "../scene/sceneEngine";
 import { clockFillPercent, clockShare } from "./clockFill";
+import { formatElapsed } from "./elapsedFormat";
 import { FlyBrainView } from "./FlyBrainView";
 import { Crest, Hourglass, pieceGlyph } from "./Heraldry";
 import { useHasKeyboard } from "./inputMode";
@@ -130,15 +131,6 @@ function useRoomForRail(): boolean {
     return () => query.removeEventListener("change", onChange);
   }, []);
   return wide;
-}
-
-function formatElapsed(ms: number): string {
-  const total = Math.max(0, Math.floor(ms / 1000));
-  const seconds = total % 60;
-  const minutes = Math.floor(total / 60) % 60;
-  const hours = Math.floor(total / 3600);
-  const mm = hours > 0 ? minutes.toString().padStart(2, "0") : minutes.toString();
-  return `${hours > 0 ? `${hours}:` : ""}${mm}:${seconds.toString().padStart(2, "0")}`;
 }
 
 export function Hud({

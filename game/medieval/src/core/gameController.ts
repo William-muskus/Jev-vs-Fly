@@ -21,6 +21,7 @@ import {
   PIECE_VALUE,
 } from "./types";
 import { AiClient, type EngineMove } from "../ai/aiClient";
+import { stampChessPgn } from "./pgnRecord";
 
 export interface StartOptions {
   mode: GameMode;
@@ -228,9 +229,9 @@ export class GameController extends Emitter<ControllerEvents> {
   private premoveDepth: number = DEFAULT_PREMOVE_DEPTH;
   /** Minimum wall time an engine reply is held for, in ms. */
   private thinkFloorMs: number = DEFAULT_THINK_FLOOR_MS;
-  private snapshot: GameSnapshot = this.buildSnapshot();
   private movers: Partial<Record<Faction, (fen: string, historyUci: string[]) => Promise<EngineMove | null>>> = {};
   private sideNames: { w: string; b: string } = { w: "Ivory", b: "Obsidian" };
+  private snapshot: GameSnapshot = this.buildSnapshot();
   /** Cap a watched duel so it cannot run forever. Null = play to a chess ending. */
   private maxPlies: number | null = null;
 
@@ -1072,7 +1073,12 @@ export class GameController extends Emitter<ControllerEvents> {
       playerColor: this.options.playerColor,
       turn: this.chess.turn() as Faction,
       fen: this.chess.fen(),
-      pgn: this.chess.pgn(),
+      pgn: stampChessPgn(this.chess, {
+        white: this.sideNames?.w ?? "Ivory",
+        black: this.sideNames?.b ?? "Obsidian",
+        result: this.result,
+        round: this.demoRound,
+      }),
       inCheck: this.chess.isCheck(),
       thinking: this.thinking,
       busy: this.busy,

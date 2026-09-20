@@ -151,6 +151,46 @@
   pointer-events: none;
 }
 
+.mc-verdict-clocks {
+  margin-top: 1rem;
+  display: grid;
+  gap: 0.35rem;
+  text-align: left;
+}
+
+.mc-verdict-clock {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.35rem 0.55rem;
+  border: 1px solid rgba(138, 101, 34, 0.28);
+  background: rgba(0, 0, 0, 0.06);
+}
+
+.mc-verdict-clock-name {
+  font-family: "Cinzel", Georgia, serif;
+  font-size: 0.72rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: #5c4524;
+}
+
+.mc-verdict-clock-time {
+  font-family: "Cinzel", Georgia, serif;
+  font-size: 0.85rem;
+  font-variant-numeric: tabular-nums;
+  color: #3d2d15;
+}
+
+.mc-verdict-jev {
+  margin-top: 0.55rem;
+  font-family: "Cinzel", Georgia, serif;
+  font-size: 0.68rem;
+  letter-spacing: 0.08em;
+  color: #7d6236;
+}
+
 .mc-slate {
   background: linear-gradient(165deg, rgba(26, 27, 33, 0.94), rgba(12, 13, 17, 0.96));
   border: 1px solid rgba(216, 177, 99, 0.28);
