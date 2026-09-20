@@ -130,10 +130,14 @@ export class FlyBrain {
   /**
    * One full forward pass.
    * @param {Float32Array} x  flattened planes, length input_dim (1280)
-   * @param {{trace?: Int32Array|Uint32Array|number[]|null, activity?: boolean}} [opts]
+   * @param {{trace?: Int32Array|Uint32Array|number[]|null, activity?: boolean, onStep?: function, yield?: boolean, wait?: function}} [opts]
    *   trace: neuron indices to sample after every timestep → result.trace = Float32Array(steps * trace.length),
    *   laid out [t][j] (t = 0 is the state after the first step). `activity` is accepted for API symmetry
    *   with FlyBrainGPU and ignored (the final state costs nothing here).
+   *   onStep(t, row): after every timestep, a fresh Float32Array(trace.length) of that step's sample
+   *   (same neurons as `trace`). The hall posts these to the page so the map lights as the fly thinks.
+   *   yield: if true, `forward` returns a Promise and awaits `wait()` (or a macrotask) after every
+   *   step so the page can paint live activity. Search / tests keep the sync path.
    * @returns {{policy: Float32Array, value: number, activity: Float32Array, retinaDrive: Float32Array|null, trace: Float32Array|null}}
    *   activity is the final hidden state and retinaDrive the per-photoreceptor drive (null without
    *   vision) — both views that are reused on the next call (copy if you keep them); policy and trace are fresh.
@@ -165,75 +169,109 @@ export class FlyBrain {
       }
     }
     const traceIdx = opts && opts.trace ? opts.trace : null;
+    const onStep = opts && typeof opts.onStep === 'function' ? opts.onStep : null;
     const L = traceIdx ? traceIdx.length : 0;
     const trace = traceIdx ? new Float32Array(this.steps * L) : null;
+    const emitStep = (t, state) => {
+      if (trace) {
+        const off = t * L;
+        for (let j = 0; j < L; j++) trace[off + j] = state[traceIdx[j]];
+      }
+      if (onStep && L) {
+        const row = new Float32Array(L);
+        if (trace) row.set(trace.subarray(t * L, t * L + L));
+        else for (let j = 0; j < L; j++) row[j] = state[traceIdx[j]];
+        onStep(t, row);
+      }
+    };
     const feat = this._feat, outputIdx = this.outputIdx, nOut = this.nOut, slot = this.readoutSlot;
     let h = this._h, h2 = this._h2;
     h.fill(0);
     const t0 = (typeof performance !== 'undefined' ? performance.now() : Date.now());
     const relu = act === ACTS.relu;
-    if (this.neuromod) {
-      // gated rows: pre = ion * (1 + tanh(mod)) + base; rows without modulatory inputs keep pre = ion + base
-      const mIndptr = this.modIndptr, mCol = this.modCol, wMod = this.wMod;
-      for (let t = 0; t < this.steps; t++) {
-        let e = indptr[0], me = mIndptr[0];
-        for (let i = 0; i < n; i++) {
-          const end = indptr[i + 1], mend = mIndptr[i + 1];
-          let s = 0;
-          for (; e < end; e++) s += w[e] * h[col[e]];
-          if (me < mend) {
-            let m = 0;
-            for (; me < mend; me++) m += wMod[me] * h[mCol[me]];
-            s *= 1 + Math.tanh(m);
-          }
-          s += base[i];
-          h2[i] = oma[i] * h[i] + alpha[i] * act(s);
-        }
-        const tmp = h; h = h2; h2 = tmp;
-        if (slot[t] >= 0) { const off = slot[t] * nOut; for (let j = 0; j < nOut; j++) feat[off + j] = h[outputIdx[j]]; }
-        if (trace) { const off = t * L; for (let j = 0; j < L; j++) trace[off + j] = h[traceIdx[j]]; }
-      }
-    } else {
-      for (let t = 0; t < this.steps; t++) {
-        let e = indptr[0];
-        if (relu) {
+    const neuromod = this.neuromod;
+    const shouldYield = !!(opts && opts.yield);
+    const eachStep = function* () {
+      if (neuromod) {
+        // gated rows: pre = ion * (1 + tanh(mod)) + base; rows without modulatory inputs keep pre = ion + base
+        const mIndptr = this.modIndptr, mCol = this.modCol, wMod = this.wMod;
+        for (let t = 0; t < this.steps; t++) {
+          let e = indptr[0], me = mIndptr[0];
           for (let i = 0; i < n; i++) {
-            const end = indptr[i + 1];
-            let s = base[i];
+            const end = indptr[i + 1], mend = mIndptr[i + 1];
+            let s = 0;
             for (; e < end; e++) s += w[e] * h[col[e]];
-            h2[i] = oma[i] * h[i] + (s > 0 ? alpha[i] * s : 0);
-          }
-        } else {
-          for (let i = 0; i < n; i++) {
-            const end = indptr[i + 1];
-            let s = base[i];
-            for (; e < end; e++) s += w[e] * h[col[e]];
+            if (me < mend) {
+              let m = 0;
+              for (; me < mend; me++) m += wMod[me] * h[mCol[me]];
+              s *= 1 + Math.tanh(m);
+            }
+            s += base[i];
             h2[i] = oma[i] * h[i] + alpha[i] * act(s);
           }
+          const tmp = h; h = h2; h2 = tmp;
+          if (slot[t] >= 0) { const off = slot[t] * nOut; for (let j = 0; j < nOut; j++) feat[off + j] = h[outputIdx[j]]; }
+          emitStep(t, h);
+          yield;
         }
-        const tmp = h; h = h2; h2 = tmp;
-        if (slot[t] >= 0) { const off = slot[t] * nOut; for (let j = 0; j < nOut; j++) feat[off + j] = h[outputIdx[j]]; }
-        if (trace) { const off = t * L; for (let j = 0; j < L; j++) trace[off + j] = h[traceIdx[j]]; }
+      } else {
+        for (let t = 0; t < this.steps; t++) {
+          let e = indptr[0];
+          if (relu) {
+            for (let i = 0; i < n; i++) {
+              const end = indptr[i + 1];
+              let s = base[i];
+              for (; e < end; e++) s += w[e] * h[col[e]];
+              h2[i] = oma[i] * h[i] + (s > 0 ? alpha[i] * s : 0);
+            }
+          } else {
+            for (let i = 0; i < n; i++) {
+              const end = indptr[i + 1];
+              let s = base[i];
+              for (; e < end; e++) s += w[e] * h[col[e]];
+              h2[i] = oma[i] * h[i] + alpha[i] * act(s);
+            }
+          }
+          const tmp = h; h = h2; h2 = tmp;
+          if (slot[t] >= 0) { const off = slot[t] * nOut; for (let j = 0; j < nOut; j++) feat[off + j] = h[outputIdx[j]]; }
+          emitStep(t, h);
+          yield;
+        }
       }
-    }
-    this.lastStepMs = ((typeof performance !== 'undefined' ? performance.now() : Date.now()) - t0) / this.steps;
-    // keep the final state in this._h so the returned activity stays valid until the next forward
-    this._h = h; this._h2 = h2;
-    // central summary: Linear on the final activity of the central-brain neurons, appended last
-    if (this.centralDim > 0) {
-      const C = this.centralDim, J = this.nCentral, cw = this.centralW, cb = this.centralB, cidx = this.centralIdx;
-      const off0 = nOut * this.readoutSteps.length;
-      for (let c = 0, off = 0; c < C; c++, off += J) {
-        let s = cb[c];
-        for (let j = 0; j < J; j++) s += cw[off + j] * h[cidx[j]];
-        feat[off0 + c] = s;
+    }.bind(this);
+
+    const afterLoop = () => {
+      this.lastStepMs = ((typeof performance !== 'undefined' ? performance.now() : Date.now()) - t0) / this.steps;
+      // keep the final state in this._h so the returned activity stays valid until the next forward
+      this._h = h; this._h2 = h2;
+      // central summary: Linear on the final activity of the central-brain neurons, appended last
+      if (this.centralDim > 0) {
+        const C = this.centralDim, J = this.nCentral, cw = this.centralW, cb = this.centralB, cidx = this.centralIdx;
+        const off0 = nOut * this.readoutSteps.length;
+        for (let c = 0, off = 0; c < C; c++, off += J) {
+          let s = cb[c];
+          for (let j = 0; j < J; j++) s += cw[off + j] * h[cidx[j]];
+          feat[off0 + c] = s;
+        }
       }
+      const res = this._heads(feat);
+      res.activity = h;
+      res.retinaDrive = this.vision ? this._retDrive : null;
+      res.trace = trace;
+      return res;
+    };
+
+    if (!shouldYield) {
+      for (const _ of eachStep()) { /* drain */ }
+      return afterLoop();
     }
-    const res = this._heads(feat);
-    res.activity = h;
-    res.retinaDrive = this.vision ? this._retDrive : null;
-    res.trace = trace;
-    return res;
+    const waitStep = opts && typeof opts.wait === 'function'
+      ? opts.wait
+      : () => new Promise((r) => setTimeout(r, 0));
+    return (async () => {
+      for (const _ of eachStep()) await waitStep();
+      return afterLoop();
+    })();
   }
 
   _heads(feat) {

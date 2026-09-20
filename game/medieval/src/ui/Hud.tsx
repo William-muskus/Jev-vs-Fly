@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type MutableRefObject } from "react";
 import {
   Box,
   Camera,
@@ -66,6 +66,8 @@ interface HudProps {
   flyAnatomy?: FlyAnatomy | null;
   flyThought?: FlyThought | null;
   flyThinking?: boolean;
+  flyLiveStep?: string | null;
+  flyLiveBind?: MutableRefObject<((sample: Float32Array | number[], step: number, steps: number) => void) | null>;
 }
 
 const DEMO_SPEEDS: { label: string; value: number }[] = [
@@ -160,6 +162,8 @@ export function Hud({
   flyAnatomy = null,
   flyThought = null,
   flyThinking = false,
+  flyLiveStep = null,
+  flyLiveBind,
 }: HudProps) {
   const railRoom = useRoomForRail();
   /** Key hints are printed only where there are keys to press. */
@@ -306,7 +310,15 @@ export function Hud({
           </div>
 
           <FieldTally snapshot={snapshot} getElapsed={getElapsed} />
-          {flyAnatomy ? <FlyBrainView anatomy={flyAnatomy} thought={flyThought} thinking={flyThinking} /> : null}
+          {flyAnatomy ? (
+            <FlyBrainView
+              anatomy={flyAnatomy}
+              thought={flyThought}
+              thinking={flyThinking}
+              liveBind={flyLiveBind}
+              liveStep={flyLiveStep}
+            />
+          ) : null}
         </div>
 
         <div className="pointer-events-auto flex flex-wrap items-center justify-end gap-1.5">

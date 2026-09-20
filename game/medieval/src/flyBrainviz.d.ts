@@ -6,6 +6,8 @@ declare module "../../../../web/brainviz.js" {
     constructor(canvas: HTMLCanvasElement);
     setData(sample: unknown, silhouette: unknown, legend: string[]): void;
     setActivity(values: ArrayLike<number> | null): void;
+    setLiveActivity(values: ArrayLike<number> | null): void;
+    resetLiveScale(): void;
     setTrace(trace: ArrayLike<number>, steps: number, opts?: { autoplay?: boolean }): void;
     setThinking(on: boolean): void;
     pause(): void;

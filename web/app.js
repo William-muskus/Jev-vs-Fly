@@ -79,6 +79,10 @@ class Brain {
       if (!p || p.cancelled) return;      // progress of an abandoned (or unknown) search must not leak into the UI
       p.touch(); this.onThinking(msg); return;
     }
+    if (msg.type === 'live') {
+      this.worker.postMessage({ type: 'live-ack' });
+      return;
+    }
     if (msg.type === 'thought') return;
     if (msg.type === 'error') {
       if (msg.id && this.pending.has(msg.id)) this._settle(msg.id, (p) => p.reject(new Error(msg.message)));

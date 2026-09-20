@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { flushSync } from "react-dom";
 
 import { ARMY_SKINS, DEFAULT_ARMY_SKINS, type ArmySkinId } from "../assets/generated";
 import { flyClient, type FlyAnatomy, type FlyThought } from "../ai/flyClient";
@@ -308,6 +309,22 @@ export function GameShell() {
   const [flyAnatomy, setFlyAnatomy] = useState<FlyAnatomy | null>(null);
   const [flyThought, setFlyThought] = useState<FlyThought | null>(null);
   const [flyThinking, setFlyThinking] = useState(false);
+  const [flyLiveStep, setFlyLiveStep] = useState<string | null>(null);
+  const flyLiveBind = useRef<((sample: Float32Array | number[], step: number, steps: number) => void) | null>(null);
+
+  const noteFlyThinking = useCallback((on: boolean) => {
+    flushSync(() => {
+      setFlyThinking(on);
+      setFlyLiveStep(null);
+    });
+  }, []);
+
+  const noteFlyLive = useCallback((sample: Float32Array | number[], step: number, steps: number) => {
+    if (steps > 1) {
+      flushSync(() => setFlyLiveStep(`${step + 1}/${steps}`));
+    }
+    flyLiveBind.current?.(sample, step, steps);
+  }, []);
   const jevSpendRef = useRef(emptyJevUsage());
   const [jevSpend, setJevSpend] = useState(emptyJevUsage());
 
@@ -494,9 +511,11 @@ export function GameShell() {
       setFlyAnatomy(null);
       setFlyThought(null);
       setFlyThinking(false);
+      setFlyLiveStep(null);
       flyClient.onAnatomy = null;
       flyClient.onThought = null;
       flyClient.onThinking = null;
+      flyClient.onLive = null;
 
       const engine = engineRef.current;
       const showcase = config.mode === "demo";
@@ -515,7 +534,8 @@ export function GameShell() {
           flyClient.difficulty = config.flyDifficulty ?? "fly";
           flyClient.onAnatomy = setFlyAnatomy;
           flyClient.onThought = setFlyThought;
-          flyClient.onThinking = setFlyThinking;
+          flyClient.onThinking = noteFlyThinking;
+          flyClient.onLive = noteFlyLive;
           if (flyClient.anatomy) setFlyAnatomy(flyClient.anatomy);
           try {
             setNotice("Loading the fly brain…");
@@ -552,7 +572,7 @@ export function GameShell() {
       });
       setPhase("playing");
     },
-    [controller, showcaseCamera, stopAttract, resetJevSpend, noteJevUsage],
+    [controller, showcaseCamera, stopAttract, resetJevSpend, noteJevUsage, noteFlyThinking, noteFlyLive],
   );
 
   const autoStarted = useRef(false);
@@ -575,7 +595,8 @@ export function GameShell() {
     flyClient.difficulty = flyDiff;
     flyClient.onAnatomy = setFlyAnatomy;
     flyClient.onThought = setFlyThought;
-    flyClient.onThinking = setFlyThinking;
+    flyClient.onThinking = noteFlyThinking;
+    flyClient.onLive = noteFlyLive;
     if (flyClient.anatomy) setFlyAnatomy(flyClient.anatomy);
     try {
       await flyClient.load("/model/");
@@ -633,7 +654,7 @@ export function GameShell() {
     setCinema(cinemaEnabled(window.location.search));
     startingMatch.current = false;
     setPhase("playing");
-  }, [controller, showcaseCamera, stopAttract, resetJevSpend, noteJevUsage]);
+  }, [controller, showcaseCamera, stopAttract, resetJevSpend, noteJevUsage, noteFlyThinking, noteFlyLive]);
 
   useEffect(() => {
     if (autoStarted.current) return;
@@ -682,9 +703,11 @@ export function GameShell() {
     setFlyAnatomy(null);
     setFlyThought(null);
     setFlyThinking(false);
+    setFlyLiveStep(null);
     flyClient.onAnatomy = null;
     flyClient.onThought = null;
     flyClient.onThinking = null;
+    flyClient.onLive = null;
     resetJevSpend();
     setPhase("menu");
   }, [controller, resetJevSpend]);
@@ -936,6 +959,8 @@ export function GameShell() {
             flyAnatomy={flyAnatomy}
             flyThought={flyThought}
             flyThinking={flyThinking}
+            flyLiveStep={flyLiveStep}
+            flyLiveBind={flyLiveBind}
           />
         ) : null}
 

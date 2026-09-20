@@ -115,6 +115,55 @@ test('trace mode: sampled activity after every timestep, [t][j] layout, retina d
   assert.equal(b[0].trace.length, 3 * idx.length);
 });
 
+test('onStep streams each trace row without changing the result', () => {
+  const m = model({ nRet: 12, nnzMod: 60, readoutSteps: [1, 3], centralDim: 5, activation: 'satrelu' });
+  const js = new FlyBrain(m);
+  const x = randomInput(11);
+  const idx = Int32Array.from([0, 5, 9, 17, 33, 63, 2]);
+  const rows = [];
+  const withCb = js.forward(x, { trace: idx, onStep: (t, row) => rows.push({ t, row: Float32Array.from(row) }) });
+  const plain = js.forward(x, { trace: idx });
+  assert.equal(rows.length, js.steps);
+  assert.ok(maxAbsDiff(withCb.policy, plain.policy) < 1e-12);
+  assert.ok(maxAbsDiff(withCb.trace, plain.trace) < 1e-12);
+  for (let t = 0; t < js.steps; t++) {
+    assert.equal(rows[t].t, t);
+    assert.equal(rows[t].row.length, idx.length);
+    for (let j = 0; j < idx.length; j++) {
+      assert.equal(rows[t].row[j], plain.trace[t * idx.length + j]);
+    }
+  }
+});
+
+test('a yielded forward matches the sync result', async () => {
+  const m = model({ nRet: 12, nnzMod: 60, readoutSteps: [1, 3], centralDim: 5, activation: 'satrelu' });
+  const js = new FlyBrain(m);
+  const x = randomInput(11);
+  const idx = Int32Array.from([0, 5, 9, 17, 33, 63, 2]);
+  const sync = js.forward(x, { trace: idx });
+  const yielded = await js.forward(x, { trace: idx, yield: true });
+  assert.ok(maxAbsDiff(yielded.policy, sync.policy) < 1e-12);
+  assert.ok(maxAbsDiff(yielded.trace, sync.trace) < 1e-12);
+});
+
+test('a yielded forward can wait between steps', async () => {
+  const m = model({ nRet: 12, nnzMod: 60, readoutSteps: [1, 3], centralDim: 5, activation: 'satrelu' });
+  const js = new FlyBrain(m);
+  const x = randomInput(11);
+  const idx = Int32Array.from([0, 5, 9, 17, 33, 63, 2]);
+  const seen = [];
+  let waits = 0;
+  const out = await js.forward(x, {
+    trace: idx,
+    yield: true,
+    onStep: (t) => seen.push(t),
+    wait: async () => { waits += 1; },
+  });
+  assert.equal(seen.length, js.steps);
+  assert.equal(waits, js.steps);
+  assert.equal(out.trace.length, js.steps * idx.length);
+});
+
 test('a photoreceptor that is also an output neuron and duplicate-free maps', () => {
   const m = model({ nRet: 12 });
   const overlap = Array.from(m.arrays.retina_idx).filter((i) => Array.from(m.arrays.output_idx).includes(i));
