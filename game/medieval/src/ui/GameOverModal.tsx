@@ -145,7 +145,7 @@ export function GameOverModal({
 
           {jevCost ? <p className="mc-verdict-jev">{formatJevSpend(jevCost)}</p> : null}
 
-          <div className="mt-5 max-h-40 overflow-y-auto rounded-sm border border-[#8a652255] bg-[#00000010] p-3 text-left font-mono text-[0.7rem] leading-relaxed text-[#4a3a24]">
+          <div className="mt-5 max-h-40 overflow-y-auto whitespace-pre-wrap rounded-sm border border-[#8a652255] bg-[#00000010] p-3 text-left font-mono text-[0.7rem] leading-relaxed text-[#4a3a24]">
             {pgn.length > 0 ? pgn : "1. (no moves)"}
           </div>
 

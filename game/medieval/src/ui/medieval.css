@@ -187,7 +187,8 @@
   margin-top: 0.55rem;
   font-family: "Cinzel", Georgia, serif;
   font-size: 0.68rem;
-  letter-spacing: 0.08em;
+  letter-spacing: 0.04em;
+  font-variant-numeric: tabular-nums;
   color: #7d6236;
 }
 
