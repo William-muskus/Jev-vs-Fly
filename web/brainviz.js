@@ -11,6 +11,8 @@ export const CLASS_COLORS = {
   visual_centrifugal: [120, 170, 240], ascending: [255, 203, 107], descending: [255, 120, 70], motor: [255, 80, 70],
   sensory_ascending: [190, 240, 120], endocrine: [240, 130, 200], unknown: [150, 150, 150],
 };
+/** One ink for the hall's brain canvas — class colours stay on the strip chart. */
+export const NEURON_COLOR = [216, 177, 99];
 /** Rows of the strip chart, in the order the signal travels. */
 export const FLOW_ORDER = ['retina', 'sensory', 'sensory_ascending', 'optic', 'visual_projection', 'visual_centrifugal', 'ascending', 'central', 'endocrine', 'descending', 'motor', 'unknown'];
 
@@ -93,7 +95,7 @@ export class BrainCanvas {
     this.sample = null; this.silhouette = null; this.legend = [];
     this.values = null; this.target = null; this.from = null; this.tStart = 0;
     this.pulse = 0; this.thinking = false;
-    this.sprites = {};
+    this.sprite = null;
     this.raf = 0;
     this.timer = 0;
     this.lastDraw = 0;
@@ -195,15 +197,17 @@ export class BrainCanvas {
     this._draw();
   }
 
-  _sprite(cls) {
-    if (this.sprites[cls]) return this.sprites[cls];
-    const [r, g, b] = this.colorOf(cls);
-    const c = document.createElement('canvas'); c.width = c.height = 32;
+  _sprite() {
+    if (this.sprite) return this.sprite;
+    const [r, g, b] = NEURON_COLOR;
+    const c = document.createElement('canvas'); c.width = c.height = 16;
     const x = c.getContext('2d');
-    const grad = x.createRadialGradient(16, 16, 0, 16, 16, 16);
-    grad.addColorStop(0, `rgba(${r},${g},${b},1)`); grad.addColorStop(0.25, `rgba(${r},${g},${b},.7)`); grad.addColorStop(1, `rgba(${r},${g},${b},0)`);
-    x.fillStyle = grad; x.fillRect(0, 0, 32, 32);
-    this.sprites[cls] = c;
+    const grad = x.createRadialGradient(8, 8, 0, 8, 8, 7);
+    grad.addColorStop(0, `rgba(${r},${g},${b},.85)`);
+    grad.addColorStop(0.4, `rgba(${r},${g},${b},.28)`);
+    grad.addColorStop(1, `rgba(${r},${g},${b},0)`);
+    x.fillStyle = grad; x.fillRect(0, 0, 16, 16);
+    this.sprite = c;
     return c;
   }
 
@@ -261,12 +265,11 @@ export class BrainCanvas {
     const x = c.getContext('2d');
     x.setTransform(dpr, 0, 0, dpr, 0, 0);
     const sil = this.silhouette;
-    const stride = sil.cls.length > 1600 ? Math.ceil(sil.cls.length / 1600) : 1;
-    for (let i = 0; i < sil.cls.length; i += stride) {
-      const [r, g, b] = this.colorOf(sil.cls[i]);
+    const [r, g, b] = NEURON_COLOR;
+    x.fillStyle = `rgba(${r},${g},${b},.07)`;
+    for (let i = 0; i < sil.cls.length; i++) {
       const [px, py] = this._project(sil.xy[2 * i], sil.xy[2 * i + 1]);
-      x.fillStyle = `rgba(${r},${g},${b},.13)`;
-      x.fillRect(px, py, 1.2, 1.2);
+      x.fillRect(px, py, 1, 1);
     }
     return c;
   }
@@ -280,27 +283,18 @@ export class BrainCanvas {
     if (this.silBitmap) ctx.drawImage(this.silBitmap, 0, 0, this.w, this.h);
     const s = this.sample;
     if (!s) return;
-    ctx.globalCompositeOperation = 'lighter';
+    const sprite = this._sprite();
     const thinking = this.thinking;
     for (let i = 0; i < s.cls.length; i++) {
       let a = this.values ? this.values[i] : 0;
-      if (thinking) {
-        // Quiet neurons only pulse on a subset so a 2k sample does not
-        // drawImage 2k sprites on the same thread as the 3D hall.
-        if (i & 3) {
-          if (a < 0.08) continue;
-        } else {
-          a = Math.min(1, a * 0.7 + 0.35 * this.pulse * (0.5 + 0.5 * Math.sin(t / 220 + i * 0.37)));
-        }
-      }
-      if (a < 0.05) continue;
+      if (thinking) a = Math.min(1, a * 0.75 + 0.16 * this.pulse * (0.5 + 0.5 * Math.sin(t / 260 + i * 0.37)));
+      if (a < 0.06) continue;
       const [px, py] = this._project(s.xy[2 * i], s.xy[2 * i + 1]);
-      const size = 3 + 9 * a;
-      ctx.globalAlpha = 0.25 + 0.75 * a;
-      ctx.drawImage(this._sprite(s.cls[i]), px - size / 2, py - size / 2, size, size);
+      const size = 1.6 + 4.2 * a;
+      ctx.globalAlpha = 0.16 + 0.42 * a;
+      ctx.drawImage(sprite, px - size / 2, py - size / 2, size, size);
     }
     ctx.globalAlpha = 1;
-    ctx.globalCompositeOperation = 'source-over';
   }
 }
 

@@ -131,7 +131,9 @@ export class FlyClient {
       worker.onmessageerror = () => {
         fail(new Error("fly worker crashed"));
       };
-      worker.postMessage({ type: "load", baseUrl, gpu, silhouetteN: 900, sampleN: 512 });
+      // Full worker sample (2048 neurons) and silhouette (6000). Do not thin
+      // those arrays here — the hall canvas draws every point, in one ink.
+      worker.postMessage({ type: "load", baseUrl, gpu });
     });
   }
 

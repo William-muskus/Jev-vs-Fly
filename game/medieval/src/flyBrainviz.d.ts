@@ -1,5 +1,6 @@
 declare module "../../../../web/brainviz.js" {
   export const CLASS_COLORS: Record<string, [number, number, number]>;
+  export const NEURON_COLOR: [number, number, number];
   export class BrainCanvas {
     raf: number;
     constructor(canvas: HTMLCanvasElement);
