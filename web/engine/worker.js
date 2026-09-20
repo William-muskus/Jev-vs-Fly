@@ -302,6 +302,7 @@ function liveForwardOpts(id, extra = {}) {
   return {
     trace: sampleIdx,
     ...extra,
+    yield: true,
     onStep: (t, row) => {
       self.postMessage({ type: 'live', id, activitySample: row, step: t, steps: brain.steps });
     },

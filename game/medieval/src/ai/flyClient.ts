@@ -54,6 +54,29 @@ export class FlyClient {
   onThinking: ((thinking: boolean) => void) | null = null;
   /** Live sampled activity while a forward/search is still running. Not React state. */
   onLive: ((sample: Float32Array | number[], step: number, steps: number) => void) | null = null;
+  private liveListeners = new Set<(sample: Float32Array | number[], step: number, steps: number) => void>();
+
+  subscribeLive(fn: (sample: Float32Array | number[], step: number, steps: number) => void): () => void {
+    this.liveListeners.add(fn);
+    return () => {
+      this.liveListeners.delete(fn);
+    };
+  }
+
+  private dispatchLive(sample: Float32Array | number[], step: number, steps: number): void {
+    try {
+      this.onLive?.(sample, step, steps);
+    } catch {
+      /* a viewer throw must not stall the worker pump */
+    }
+    for (const fn of this.liveListeners) {
+      try {
+        fn(sample, step, steps);
+      } catch {
+        /* ignore */
+      }
+    }
+  }
 
   load(baseUrl = "/model/"): Promise<void> {
     if (!this.ready) {
@@ -110,7 +133,11 @@ export class FlyClient {
         if (msg.type === "progress" || msg.type === "backend") return;
         if (msg.type === "live") {
           if (msg.activitySample) {
-            this.onLive?.(msg.activitySample, msg.step ?? 0, msg.steps && msg.steps > 0 ? msg.steps : 1);
+            this.dispatchLive(
+              msg.activitySample,
+              msg.step ?? 0,
+              msg.steps && msg.steps > 0 ? msg.steps : 1,
+            );
           }
           return;
         }

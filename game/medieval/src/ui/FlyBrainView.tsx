@@ -56,10 +56,7 @@ export const FlyBrainView = memo(function FlyBrainView({
       vizRef.current?.setLiveActivity(sample);
       if (steps > 1) setLiveCaption(`step ${step + 1}/${steps}`);
     };
-    flyClient.onLive = onLive;
-    return () => {
-      if (flyClient.onLive === onLive) flyClient.onLive = null;
-    };
+    return flyClient.subscribeLive(onLive);
   }, []);
 
   useEffect(() => {
