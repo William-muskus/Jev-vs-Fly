@@ -568,7 +568,7 @@ export function GameShell() {
     const strategy = params.get("strategy") || "best_this_turn";
     const flyDiff = (opts?.flyDifficulty || params.get("difficulty") || "fly") as "larva" | "fly" | "superfly";
     const jevWhite = (params.get("jevColor") || "white") !== "black";
-    const speed = Number(opts?.speed ?? params.get("speed") || "1") || 1;
+    const speed = Number(opts?.speed ?? params.get("speed") ?? "1") || 1;
     const maxPliesRaw = Number(params.get("maxPlies") || "80");
     const maxPlies = Number.isFinite(maxPliesRaw) && maxPliesRaw > 0 ? maxPliesRaw : 80;
     const cinematics = params.get("cinematics") !== "0";
