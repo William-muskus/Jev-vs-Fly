@@ -526,6 +526,12 @@ export class PieceView {
   private hit = 0;
   /** 1 right after the figure sets down, decaying — flares the ground aura. */
   private aura = 0;
+  /**
+   * True once hover/hit/alarm/aura have decayed and the rest pose is planted.
+   * The material loop writes emissive on every mesh every frame; skipping it
+   * while thirty-two figures just stand there is the low-graphics budget.
+   */
+  private restGlow = false;
   /** Set once the death clip starts so nothing pulls the corpse back up. */
   private slain = false;
   /** Resting orientation (facing the enemy side) to return to after a fight. */
@@ -820,6 +826,12 @@ export class PieceView {
     this.badgeOpacity += (target - this.badgeOpacity) * Math.min(1, delta * 6);
     const material = badge.material as THREE.SpriteMaterial;
     material.opacity = this.badgeOpacity * this.fade;
+
+    if (!this.selected && !this.hovered && alarmPulse === 0 && Math.abs(this.badgeOpacity - target) < 0.01) {
+      badge.position.y = PIECE_HEIGHT[this.kind] + BADGE_LIFT;
+      badge.scale.setScalar(BADGE_SCALE[this.kind]);
+      return;
+    }
 
     const bob = Math.sin(elapsed * 1.5 + this.phase) * 0.022;
     badge.position.y =
@@ -1504,8 +1516,7 @@ export class PieceView {
       return;
     }
 
-    const breath = Math.sin(elapsed * (this.majestic ? 0.7 : 1.15) + this.phase);
-    const sway = Math.sin(elapsed * (this.majestic ? 0.42 : 0.7) + this.phase * 1.7);
+    const posed = Boolean(this.mixer && (this.idleLooping || this.marchLoop || this.activeOneShot || this.aiming));
     const lift = this.selected
       ? this.majestic
         ? 0.11
@@ -1515,12 +1526,13 @@ export class PieceView {
           ? 0.05
           : 0.075
         : 0;
+    const lit = this.selected || this.hovered || this.hit > 0.02 || this.alarm > 0 || this.aura > 0.02;
 
     if (this.flat) {
       // Nothing of the sculpt is on screen: skip the skeleton entirely and just
       // let the figure stand back up under its counter.
       this.runtime.position.y += (0 - this.runtime.position.y) * Math.min(1, delta * 9);
-    } else if (this.mixer) {
+    } else if (posed && this.mixer) {
       this.mixer.update(delta);
       if (this.rootBone && this.lockRootMotion) {
         // Keep the figure planted on its square; clips carry their own steps.
@@ -1537,13 +1549,33 @@ export class PieceView {
       this.runtime.rotation.z = 0;
       // Re-applied after the mixer, which owns the pose for the rest of the frame.
       this.runtime.rotation.x = this.strikeTilt;
-    } else {
+      this.restGlow = false;
+    } else if (this.mixer) {
+      // Idle clips are off (low graphics, or the stance has not been asked to
+      // loop). Mixer.update is the expensive part; hold the posed rest and
+      // only ease off a hover lift.
+      this.runtime.position.y += (lift - this.runtime.position.y) * Math.min(1, delta * 9);
+      this.runtime.rotation.z = 0;
+      this.runtime.rotation.x = this.strikeTilt;
+    } else if (this.idleWanted || lit) {
       // Fallback figures keep the procedural breath and weight shift.
+      const breath = Math.sin(elapsed * (this.majestic ? 0.7 : 1.15) + this.phase);
+      const sway = Math.sin(elapsed * (this.majestic ? 0.42 : 0.7) + this.phase * 1.7);
       const amplitude = this.majestic ? 0.45 : 1;
       this.runtime.position.y +=
         (lift + breath * 0.006 * amplitude - this.runtime.position.y) * Math.min(1, delta * 9);
       this.runtime.rotation.z = sway * 0.012 * amplitude;
       this.runtime.rotation.x = breath * 0.008 * amplitude + this.strikeTilt;
+    } else {
+      this.runtime.position.y += (lift - this.runtime.position.y) * Math.min(1, delta * 9);
+      this.runtime.rotation.z = 0;
+      this.runtime.rotation.x = this.strikeTilt;
+    }
+
+    if (!posed && !lit && this.restGlow) {
+      this.updateBadge(delta, elapsed, 0);
+      this.updateToken(delta, 0);
+      return;
     }
 
     const target = this.selected ? 0.5 : this.hovered ? 0.32 : 0.06;
@@ -1576,6 +1608,10 @@ export class PieceView {
 
     this.updateBadge(delta, elapsed, alarmPulse);
     this.updateToken(delta, alarmPulse);
+    this.restGlow =
+      !lit &&
+      Math.abs(this.runtime.position.y - lift) < 0.002 &&
+      Math.abs(glowMaterial.opacity - RING_REST) < 0.02;
   }
 
   /**
@@ -1583,7 +1619,7 @@ export class PieceView {
    * no hover lift, no team glow — the fall has to read as a fall.
    */
   private updateSlain(delta: number): void {
-    if (!this.flat) {
+    if (!this.flat && this.activeOneShot) {
       this.mixer?.update(delta);
       this.arms?.align();
     }

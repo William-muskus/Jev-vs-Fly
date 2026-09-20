@@ -197,6 +197,8 @@ export class GameController extends Emitter<ControllerEvents> {
   /** `performance.now()` stamp the queued showcase rematch is due to fire at. */
   private rematchAt = 0;
   private lastTickAt = 0;
+  private lastClockWhiteSec = -1;
+  private lastClockBlackSec = -1;
   private generation = 0;
   private paused = false;
   private demoRound = 1;
@@ -982,6 +984,8 @@ export class GameController extends Emitter<ControllerEvents> {
     this.stopClock();
     if (!this.clock.enabled || this.paused || this.status !== "playing") return;
     this.lastTickAt = performance.now();
+    this.lastClockWhiteSec = Math.ceil(this.clock.whiteMs / 1000);
+    this.lastClockBlackSec = Math.ceil(this.clock.blackMs / 1000);
     this.clockTimer = setInterval(() => this.tickClock(), CLOCK_TICK_MS);
   }
 
@@ -1006,6 +1010,14 @@ export class GameController extends Emitter<ControllerEvents> {
       this.finish({ winner: loser === "w" ? "b" : "w", reason: "timeout" });
       return;
     }
+    // The HUD only shows whole seconds. Rebuilding the snapshot (and React's
+    // whole shell) ten times a second was a live-game hitch even with clocks
+    // that never change the printed time.
+    const whiteSec = Math.ceil(this.clock.whiteMs / 1000);
+    const blackSec = Math.ceil(this.clock.blackMs / 1000);
+    if (whiteSec === this.lastClockWhiteSec && blackSec === this.lastClockBlackSec) return;
+    this.lastClockWhiteSec = whiteSec;
+    this.lastClockBlackSec = blackSec;
     this.publish();
   }
 

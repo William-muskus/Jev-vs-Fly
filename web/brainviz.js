@@ -11,6 +11,8 @@ export const CLASS_COLORS = {
   visual_centrifugal: [120, 170, 240], ascending: [255, 203, 107], descending: [255, 120, 70], motor: [255, 80, 70],
   sensory_ascending: [190, 240, 120], endocrine: [240, 130, 200], unknown: [150, 150, 150],
 };
+/** One ink for the hall's brain canvas — class colours stay on the strip chart. */
+export const NEURON_COLOR = [216, 177, 99];
 /** Rows of the strip chart, in the order the signal travels. */
 export const FLOW_ORDER = ['retina', 'sensory', 'sensory_ascending', 'optic', 'visual_projection', 'visual_centrifugal', 'ascending', 'central', 'endocrine', 'descending', 'motor', 'unknown'];
 
@@ -93,13 +95,17 @@ export class BrainCanvas {
     this.sample = null; this.silhouette = null; this.legend = [];
     this.values = null; this.target = null; this.from = null; this.tStart = 0;
     this.pulse = 0; this.thinking = false;
-    this.sprites = {};
+    this.sprite = null;
     this.raf = 0;
+    this.timer = 0;
+    this.lastDraw = 0;
+    this.silBitmap = null;
     this.bounds = null;
     // replay state
     this.trace = null; this.steps = 1; this.m = 0; this.pos = 0; this.playing = false; this.playT0 = 0; this.playFrom = 0;
     this.onReplay = () => {};     // (pos, steps, playing) — the page updates its scrubber / counter
-    new ResizeObserver(() => this._resize()).observe(canvas);
+    this.ro = new ResizeObserver(() => this._resize());
+    this.ro.observe(canvas);
     this._resize();
   }
 
@@ -113,6 +119,7 @@ export class BrainCanvas {
     this.target = new Float32Array(sample.idx.length);
     this.m = sample.idx.length;
     this.trace = null;
+    this.silBitmap = null;
     this._draw();
   }
 
@@ -166,6 +173,19 @@ export class BrainCanvas {
 
   setThinking(on) { this.thinking = on; if (on) { this.playing = false; this._loop(); } }
 
+  dispose() {
+    this.thinking = false;
+    this.playing = false;
+    this.pause();
+    if (this.raf) cancelAnimationFrame(this.raf);
+    if (this.timer) clearTimeout(this.timer);
+    this.raf = 0;
+    this.timer = 0;
+    this.ro?.disconnect();
+    this.ro = null;
+    this.silBitmap = null;
+  }
+
   _resize() {
     const dpr = Math.min(devicePixelRatio || 1, 2);
     const w = this.canvas.clientWidth, h = this.canvas.clientHeight;
@@ -173,18 +193,21 @@ export class BrainCanvas {
     this.canvas.width = Math.round(w * dpr); this.canvas.height = Math.round(h * dpr);
     this.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     this.w = w; this.h = h;
+    this.silBitmap = null;
     this._draw();
   }
 
-  _sprite(cls) {
-    if (this.sprites[cls]) return this.sprites[cls];
-    const [r, g, b] = this.colorOf(cls);
-    const c = document.createElement('canvas'); c.width = c.height = 32;
+  _sprite() {
+    if (this.sprite) return this.sprite;
+    const [r, g, b] = NEURON_COLOR;
+    const c = document.createElement('canvas'); c.width = c.height = 16;
     const x = c.getContext('2d');
-    const grad = x.createRadialGradient(16, 16, 0, 16, 16, 16);
-    grad.addColorStop(0, `rgba(${r},${g},${b},1)`); grad.addColorStop(0.25, `rgba(${r},${g},${b},.7)`); grad.addColorStop(1, `rgba(${r},${g},${b},0)`);
-    x.fillStyle = grad; x.fillRect(0, 0, 32, 32);
-    this.sprites[cls] = c;
+    const grad = x.createRadialGradient(8, 8, 0, 8, 8, 7);
+    grad.addColorStop(0, `rgba(${r},${g},${b},.85)`);
+    grad.addColorStop(0.4, `rgba(${r},${g},${b},.28)`);
+    grad.addColorStop(1, `rgba(${r},${g},${b},0)`);
+    x.fillStyle = grad; x.fillRect(0, 0, 16, 16);
+    this.sprite = c;
     return c;
   }
 
@@ -197,9 +220,14 @@ export class BrainCanvas {
   }
 
   _loop() {
-    if (this.raf) return;
+    if (this.raf || this.timer) return;
     const step = () => {
       this.raf = 0;
+      this.timer = 0;
+      if (typeof document !== 'undefined' && document.hidden) {
+        if (this.thinking || this.playing) this.timer = setTimeout(step, 250);
+        return;
+      }
       const t = performance.now();
       let busy = false;
       if (this.playing && this.trace) {
@@ -212,11 +240,38 @@ export class BrainCanvas {
         for (let i = 0; i < this.values.length; i++) this.values[i] = this.from[i] + (this.target[i] - this.from[i]) * k;
         if (k < 1) busy = true;
       }
-      this.pulse = this.thinking ? 0.5 + 0.5 * Math.sin(t / 130) : Math.max(0, this.pulse - 0.05);
-      this._draw(t);
-      if (this.thinking || busy || this.pulse > 0) this.raf = requestAnimationFrame(step);
+      this.pulse = this.thinking ? 0.5 + 0.5 * Math.sin(t / 130) : Math.max(0, this.pulse - 0.08);
+      // Thinking is a long CPU hold (JS connectome). 12 fps is enough for the
+      // pulse; 60 fps of 6k fillRects used to stall the 3D hall beside it.
+      const minGap = busy ? 16 : 100;
+      if (t - this.lastDraw >= minGap) {
+        this.lastDraw = t;
+        this._draw(t);
+      }
+      if (this.thinking || busy || this.pulse > 0) {
+        if (minGap > 0) this.timer = setTimeout(step, minGap);
+        else this.raf = requestAnimationFrame(step);
+      }
     };
     this.raf = requestAnimationFrame(step);
+  }
+
+  _bakeSilhouette() {
+    if (!this.silhouette || !this.w) return null;
+    const dpr = Math.min(devicePixelRatio || 1, 2);
+    const c = document.createElement('canvas');
+    c.width = Math.round(this.w * dpr);
+    c.height = Math.round(this.h * dpr);
+    const x = c.getContext('2d');
+    x.setTransform(dpr, 0, 0, dpr, 0, 0);
+    const sil = this.silhouette;
+    const [r, g, b] = NEURON_COLOR;
+    x.fillStyle = `rgba(${r},${g},${b},.07)`;
+    for (let i = 0; i < sil.cls.length; i++) {
+      const [px, py] = this._project(sil.xy[2 * i], sil.xy[2 * i + 1]);
+      x.fillRect(px, py, 1, 1);
+    }
+    return c;
   }
 
   _draw(t = performance.now()) {
@@ -224,28 +279,22 @@ export class BrainCanvas {
     if (!this.w) return;
     ctx.clearRect(0, 0, this.w, this.h);
     if (!this.silhouette) return;
-    // silhouette: the shape of the brain, dim
-    const sil = this.silhouette;
-    for (let i = 0; i < sil.cls.length; i++) {
-      const [r, g, b] = this.colorOf(sil.cls[i]);
-      const [px, py] = this._project(sil.xy[2 * i], sil.xy[2 * i + 1]);
-      ctx.fillStyle = `rgba(${r},${g},${b},.13)`;
-      ctx.fillRect(px, py, 1.2, 1.2);
-    }
-    // sampled neurons glowing with activity
+    if (!this.silBitmap) this.silBitmap = this._bakeSilhouette();
+    if (this.silBitmap) ctx.drawImage(this.silBitmap, 0, 0, this.w, this.h);
     const s = this.sample;
-    ctx.globalCompositeOperation = 'lighter';
+    if (!s) return;
+    const sprite = this._sprite();
+    const thinking = this.thinking;
     for (let i = 0; i < s.cls.length; i++) {
-      let a = this.values[i];
-      if (this.thinking) a = Math.min(1, a * 0.7 + 0.35 * this.pulse * (0.5 + 0.5 * Math.sin(t / 220 + i * 0.37)));
-      if (a < 0.03) continue;
+      let a = this.values ? this.values[i] : 0;
+      if (thinking) a = Math.min(1, a * 0.75 + 0.16 * this.pulse * (0.5 + 0.5 * Math.sin(t / 260 + i * 0.37)));
+      if (a < 0.06) continue;
       const [px, py] = this._project(s.xy[2 * i], s.xy[2 * i + 1]);
-      const size = 3 + 9 * a;
-      ctx.globalAlpha = 0.25 + 0.75 * a;
-      ctx.drawImage(this._sprite(s.cls[i]), px - size / 2, py - size / 2, size, size);
+      const size = 1.6 + 4.2 * a;
+      ctx.globalAlpha = 0.16 + 0.42 * a;
+      ctx.drawImage(sprite, px - size / 2, py - size / 2, size, size);
     }
     ctx.globalAlpha = 1;
-    ctx.globalCompositeOperation = 'source-over';
   }
 }
 
@@ -260,8 +309,14 @@ export class ClassStrip {
     this.canvas = canvas; this.ctx = canvas.getContext('2d');
     this.groups = []; this.norm = null; this.means = null; this.steps = 1; this.pos = 0;
     this.w = 0; this.h = 0;
-    new ResizeObserver(() => this._resize()).observe(canvas);
+    this.ro = new ResizeObserver(() => this._resize());
+    this.ro.observe(canvas);
     this._resize();
+  }
+
+  dispose() {
+    this.ro?.disconnect();
+    this.ro = null;
   }
 
   setTrace(trace, steps, groups) {

@@ -27,6 +27,11 @@ lerna-debug.log*
 !.vscode/extensions.json
 .idea
 
+# Copied from ../../web by `npm run sync-engine` so Windows clones
+# without git symlinks still get a real fly worker.
+public/engine/*.js
+public/vendor/chess.js
+
 # macOS
 .DS_Store
 *.suo

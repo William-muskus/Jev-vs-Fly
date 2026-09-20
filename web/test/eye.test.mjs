@@ -8,7 +8,7 @@ import {
   realSquare, squareName, boardFromFen, layoutEyes, seesColor, driveScale, feelsColor,
   squareDrive, gazeShift, gazeLine, eyeFiles, typeCounts, moveSquares,
 } from '../eye.js';
-import { sampleGroups, traceGroupMeans, normalizeRows, normalizeTrace, traceRow, FLOW_ORDER } from '../brainviz.js';
+import { sampleGroups, traceGroupMeans, normalizeRows, normalizeTrace, traceRow, FLOW_ORDER, NEURON_COLOR } from '../brainviz.js';
 
 const START = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1';
 
@@ -149,4 +149,8 @@ test('normalizeTrace / traceRow: log-compressed, p97-scaled over the whole trace
   const last = traceRow(n, 4, 2, new Float32Array(4));
   assert.deepEqual([...last], [...n.slice(8)]);
   assert.ok(normalizeTrace(new Float32Array(4)).every((v) => v === 0), 'an all-zero trace does not divide by zero');
+});
+
+test('the hall brain canvas is one ink, not a class rainbow', () => {
+  assert.deepEqual([...NEURON_COLOR], [216, 177, 99]);
 });

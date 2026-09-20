@@ -11,7 +11,7 @@ import type { PieceKind, SquareId } from "../core/types";
 
 export type { FlyAnatomy, FlyThought } from "./flyAnatomy";
 
-type FlyDifficulty = "larva" | "fly" | "superfly";
+export type FlyDifficulty = "larva" | "fly" | "superfly";
 
 interface FlyReply {
   type: string;
@@ -131,6 +131,8 @@ export class FlyClient {
       worker.onmessageerror = () => {
         fail(new Error("fly worker crashed"));
       };
+      // Full worker sample (2048 neurons) and silhouette (6000). Do not thin
+      // those arrays here — the hall canvas draws every point, in one ink.
       worker.postMessage({ type: "load", baseUrl, gpu });
     });
   }

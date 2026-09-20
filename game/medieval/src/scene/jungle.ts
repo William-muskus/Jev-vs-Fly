@@ -570,13 +570,13 @@ export class JungleOverlay {
 
   applyQuality(preset: QualityPreset): void {
     const settings = QUALITY_SETTINGS[preset];
-    const density = preset === "low" ? 0.4 : preset === "medium" ? 0.68 : preset === "high" ? 0.88 : 1;
+    const density = preset === "low" ? 0.12 : preset === "medium" ? 0.68 : preset === "high" ? 0.88 : 1;
 
     const trees = Math.round(MAX_TREES * density);
     if (this.trunks) this.trunks.count = trees;
     for (const mesh of this.canopies) mesh.count = trees;
     if (this.palms) this.palms.count = Math.round(MAX_PALMS * density);
-    if (this.ferns) this.ferns.count = Math.round(MAX_FERNS * density);
+    if (this.ferns) this.ferns.count = preset === "low" ? 0 : Math.round(MAX_FERNS * density);
     if (this.vines) {
       this.vines.count = Math.round(MAX_VINES * density);
       this.vines.visible = settings.battleProps;
