@@ -41,7 +41,7 @@ class Brain {
     if (msg.type === 'progress') { this.onProgress(msg); return; }
     if (msg.type === 'ready') { this.info = msg; this._resolveReady?.(msg); return; }
     if (msg.type === 'thinking') return;
-    if (msg.type === 'thought') return;
+    if (msg.type === 'thought' || msg.type === 'live') return;
     if (msg.type === 'error') {
       if (msg.id && this.pending.has(msg.id)) this._settle(msg.id, (p) => p.reject(new Error(msg.message)));
       else this._fail(new Error(msg.message));

@@ -95,6 +95,7 @@ export class BrainCanvas {
     this.sample = null; this.silhouette = null; this.legend = [];
     this.values = null; this.target = null; this.from = null; this.tStart = 0;
     this.pulse = 0; this.thinking = false;
+    this.liveScale = 0;
     this.sprite = null;
     this.raf = 0;
     this.timer = 0;
@@ -119,6 +120,7 @@ export class BrainCanvas {
     this.target = new Float32Array(sample.idx.length);
     this.m = sample.idx.length;
     this.trace = null;
+    this.liveScale = 0;
     this.silBitmap = null;
     this._draw();
   }
@@ -136,6 +138,38 @@ export class BrainCanvas {
     this.target = normalizeTrace(values); this.tStart = performance.now();
     this._loop();
   }
+
+  /**
+   * Snap the map to a sample that just arrived from a running forward (one recurrent
+   * timestep, or a search leaf). No 150 ms replay and no 500 ms lerp — the hall should
+   * light the same moment the connectome fires.
+   */
+  setLiveActivity(values) {
+    if (!this.sample || !values || !this.values) return;
+    this.trace = null;
+    this.playing = false;
+    this.from = null;
+    this.target = null;
+    const n = Math.min(this.values.length, values.length);
+    let peak = this.liveScale;
+    for (let i = 0; i < n; i++) {
+      const v = Math.log1p(Math.abs(values[i]));
+      this.values[i] = v;
+      if (v > peak) peak = v;
+    }
+    if (n < this.values.length) this.values.fill(0, n);
+    // Robust scale: grow a running peak so early steps stay dim and later ones can brighten,
+    // instead of renormalizing each packet to 1 and flattening the wave.
+    const sorted = Float32Array.from(this.values.subarray(0, n)).sort();
+    const p97 = sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * 0.97))] || peak || 1;
+    this.liveScale = Math.max(this.liveScale, p97, 1e-6);
+    const scale = this.liveScale;
+    for (let i = 0; i < n; i++) this.values[i] = Math.min(1, this.values[i] / scale);
+    this._draw();
+    if (this.thinking) this._loop();
+  }
+
+  resetLiveScale() { this.liveScale = 0; }
 
   /**
    * A full activity trace (steps × m, the sampled neurons after every timestep). The canvas shows
@@ -285,9 +319,11 @@ export class BrainCanvas {
     if (!s) return;
     const sprite = this._sprite();
     const thinking = this.thinking;
+    const hasSignal = this.values && this.liveScale > 0;
     for (let i = 0; i < s.cls.length; i++) {
       let a = this.values ? this.values[i] : 0;
-      if (thinking) a = Math.min(1, a * 0.75 + 0.16 * this.pulse * (0.5 + 0.5 * Math.sin(t / 260 + i * 0.37)));
+      // Idle pulse only before the first live sample. After that the map is the connectome.
+      if (thinking && !hasSignal) a = Math.min(1, 0.12 * this.pulse * (0.5 + 0.5 * Math.sin(t / 260 + i * 0.37)));
       if (a < 0.06) continue;
       const [px, py] = this._project(s.xy[2 * i], s.xy[2 * i + 1]);
       const size = 1.6 + 4.2 * a;

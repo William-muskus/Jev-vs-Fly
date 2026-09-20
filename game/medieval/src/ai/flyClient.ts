@@ -23,6 +23,8 @@ interface FlyReply {
   activitySample?: Float32Array | null;
   trace?: Float32Array | null;
   traceSteps?: number;
+  step?: number;
+  steps?: number;
   sample?: FlyAnatomy["sample"];
   silhouette?: FlyAnatomy["silhouette"];
   legend?: string[];
@@ -30,6 +32,11 @@ interface FlyReply {
 }
 
 const LOAD_TIMEOUT_MS = 180_000;
+
+/** Worker packets that must not resolve a pending `move` / `eval` request. */
+export function isFlyStreamMessage(type: string): boolean {
+  return type === "live" || type === "thought" || type === "thinking" || type === "progress" || type === "backend";
+}
 
 /**
  * The FlyWire connectome worker from this repo's `web/engine`.
@@ -45,6 +52,8 @@ export class FlyClient {
   onAnatomy: ((anatomy: FlyAnatomy) => void) | null = null;
   onThought: ((thought: FlyThought) => void) | null = null;
   onThinking: ((thinking: boolean) => void) | null = null;
+  /** Live sampled activity while a forward/search is still running. Not React state. */
+  onLive: ((sample: Float32Array | number[], step: number, steps: number) => void) | null = null;
 
   load(baseUrl = "/model/"): Promise<void> {
     if (!this.ready) {
@@ -99,6 +108,12 @@ export class FlyClient {
       worker.onmessage = (ev: MessageEvent<FlyReply>) => {
         const msg = ev.data;
         if (msg.type === "progress" || msg.type === "backend") return;
+        if (msg.type === "live") {
+          if (msg.activitySample) {
+            this.onLive?.(msg.activitySample, msg.step ?? 0, msg.steps && msg.steps > 0 ? msg.steps : 1);
+          }
+          return;
+        }
         if (msg.type === "thinking") {
           this.onThinking?.(true);
           return;

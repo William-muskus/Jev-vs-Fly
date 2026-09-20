@@ -28,4 +28,12 @@ describe("flyThoughtFromReply", () => {
     expect(thought?.traceSteps).toBe(2);
     expect(thought?.trace).toBe(trace);
   });
+
+  it("accepts a live activity sample without a full trace", () => {
+    const activitySample = new Float32Array([0.3, 0.9]);
+    const thought = flyThoughtFromReply({ activitySample });
+    expect(thought?.activitySample).toBe(activitySample);
+    expect(thought?.trace).toBeNull();
+    expect(thought?.traceSteps).toBe(1);
+  });
 });

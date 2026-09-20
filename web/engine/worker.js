@@ -17,6 +17,10 @@
 //                   0 left / 1 right, type: Uint8Array(n) index into `legend`, legend: ['R1-6', 'R7', 'R8'],
 //                   square: Uint8Array(n) board square rank*8+file (mover's perspective), idx: Int32Array(n) blob neuron}
 //               {type:'thinking', id, done, total}            (superfly only, every 10 simulations)
+//               {type:'live', id, activitySample, step, steps}  one sampled hidden state after a recurrent
+//                   timestep (or a superfly leaf). Posted while the fly is still choosing so the hall
+//                   can light the map in real time instead of replaying the thought afterwards.
+//               {type:'thought', id, activitySample, trace, traceSteps}  first look at the board (full trace)
 //               {type:'move', id, move, san, policyTop, value, activitySample, retinaDrive, trace, thinkMs, sims, stepMs, backend}
 //                   retinaDrive: Float32Array(n_ret) — the per-photoreceptor input drive of the position the fly
 //                   looked at (what the fly sees; null without vision); trace: only when the request asked for it
@@ -293,6 +297,28 @@ function activitySample(activity) {
   return out;
 }
 
+/** Stream each recurrent sample to the page while this forward is still running. */
+function liveForwardOpts(id, extra = {}) {
+  return {
+    trace: sampleIdx,
+    ...extra,
+    onStep: (t, row) => {
+      self.postMessage({ type: 'live', id, activitySample: row, step: t, steps: brain.steps });
+    },
+  };
+}
+
+function postLiveFromHidden(id) {
+  if (!brain || !brain._h || !sampleIdx) return;
+  self.postMessage({
+    type: 'live',
+    id,
+    activitySample: activitySample(brain._h),
+    step: brain.steps - 1,
+    steps: brain.steps,
+  });
+}
+
 async function handleMove(msg) {
   if (cancelledIds.delete(msg.id)) {
     self.postMessage({ type: 'move', id: msg.id, move: null, san: null, cancelled: true, policyTop: [], value: 0, activitySample: null, thinkMs: 0, sims: 0 });
@@ -308,14 +334,14 @@ async function handleMove(msg) {
     return;
   }
   const x = enc.encodeBoard(chess);
-  const res = await settle(net.forward(x, msg.trace ? { trace: sampleIdx } : undefined));
+  const wantLive = !!msg.trace;
+  const res = await settle(net.forward(x, wantLive ? liveForwardOpts(msg.id) : undefined));
   const probs = policyForLegal(res.policy, idx, 1);
   const act = activitySample(res.activity);
   const retinaDrive = res.retinaDrive ? Float32Array.from(res.retinaDrive) : null;   // the engines reuse the view
-  const trace = msg.trace ? res.trace : null;
-  // Stream the first look at the board before lookahead / MCTS finishes, so the
-  // hall can replay neuron activity while Fruit Fly is still choosing.
-  if (msg.trace && (act || trace)) {
+  const trace = wantLive ? res.trace : null;
+  // Full trace still goes out once so older UIs can replay; the hall prefers `live` packets above.
+  if (wantLive && (act || trace)) {
     self.postMessage({ type: 'thought', id: msg.id, activitySample: act, trace, traceSteps: brain.steps });
   }
   let chosen, value = res.value, sims = 0, note = '';
@@ -332,7 +358,13 @@ async function handleMove(msg) {
       let oppValue;
       if (chess.isCheckmate()) oppValue = -1;
       else if (chess.isDraw() || enc.repetitionCount(chess) >= 3) oppValue = 0;
-      else oppValue = (await settle(net.forward(enc.encodeBoard(chess), { activity: false }))).value;
+      else {
+        const opp = await settle(net.forward(
+          enc.encodeBoard(chess),
+          wantLive && !gpu ? liveForwardOpts(msg.id) : { activity: false },
+        ));
+        oppValue = opp.value;
+      }
       chess.undo();
       const score = -oppValue;       // our value = negated opponent value
       if (score > bestScore + 1e-9) { bestScore = score; best = i; }
@@ -347,7 +379,11 @@ async function handleMove(msg) {
       out = await runMCTSAsync(net, chess, enc, {
         sims: simsFor(cfg), cPuct: 1.5, dirichletAlpha: 0, temperature: 0, yieldEvery: 10,
         shouldStop: () => activeSearch.cancelled,
-        onProgress: (done, total) => { if (done % 10 === 0) self.postMessage({ type: 'thinking', id: msg.id, done, total }); },
+        onProgress: (done, total) => {
+          if (done % 10 !== 0) return;
+          self.postMessage({ type: 'thinking', id: msg.id, done, total });
+          if (wantLive && !gpu) postLiveFromHidden(msg.id);
+        },
       });
     } finally {
       activeSearch = null;

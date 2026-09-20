@@ -130,10 +130,12 @@ export class FlyBrain {
   /**
    * One full forward pass.
    * @param {Float32Array} x  flattened planes, length input_dim (1280)
-   * @param {{trace?: Int32Array|Uint32Array|number[]|null, activity?: boolean}} [opts]
+   * @param {{trace?: Int32Array|Uint32Array|number[]|null, activity?: boolean, onStep?: function}} [opts]
    *   trace: neuron indices to sample after every timestep → result.trace = Float32Array(steps * trace.length),
    *   laid out [t][j] (t = 0 is the state after the first step). `activity` is accepted for API symmetry
    *   with FlyBrainGPU and ignored (the final state costs nothing here).
+   *   onStep(t, row): after every timestep, a fresh Float32Array(trace.length) of that step's sample
+   *   (same neurons as `trace`). The hall posts these to the page so the map lights as the fly thinks.
    * @returns {{policy: Float32Array, value: number, activity: Float32Array, retinaDrive: Float32Array|null, trace: Float32Array|null}}
    *   activity is the final hidden state and retinaDrive the per-photoreceptor drive (null without
    *   vision) — both views that are reused on the next call (copy if you keep them); policy and trace are fresh.
@@ -165,8 +167,21 @@ export class FlyBrain {
       }
     }
     const traceIdx = opts && opts.trace ? opts.trace : null;
+    const onStep = opts && typeof opts.onStep === 'function' ? opts.onStep : null;
     const L = traceIdx ? traceIdx.length : 0;
     const trace = traceIdx ? new Float32Array(this.steps * L) : null;
+    const emitStep = (t, state) => {
+      if (trace) {
+        const off = t * L;
+        for (let j = 0; j < L; j++) trace[off + j] = state[traceIdx[j]];
+      }
+      if (onStep && L) {
+        const row = new Float32Array(L);
+        if (trace) row.set(trace.subarray(t * L, t * L + L));
+        else for (let j = 0; j < L; j++) row[j] = state[traceIdx[j]];
+        onStep(t, row);
+      }
+    };
     const feat = this._feat, outputIdx = this.outputIdx, nOut = this.nOut, slot = this.readoutSlot;
     let h = this._h, h2 = this._h2;
     h.fill(0);
@@ -191,7 +206,7 @@ export class FlyBrain {
         }
         const tmp = h; h = h2; h2 = tmp;
         if (slot[t] >= 0) { const off = slot[t] * nOut; for (let j = 0; j < nOut; j++) feat[off + j] = h[outputIdx[j]]; }
-        if (trace) { const off = t * L; for (let j = 0; j < L; j++) trace[off + j] = h[traceIdx[j]]; }
+        emitStep(t, h);
       }
     } else {
       for (let t = 0; t < this.steps; t++) {
@@ -213,7 +228,7 @@ export class FlyBrain {
         }
         const tmp = h; h = h2; h2 = tmp;
         if (slot[t] >= 0) { const off = slot[t] * nOut; for (let j = 0; j < nOut; j++) feat[off + j] = h[outputIdx[j]]; }
-        if (trace) { const off = t * L; for (let j = 0; j < L; j++) trace[off + j] = h[traceIdx[j]]; }
+        emitStep(t, h);
       }
     }
     this.lastStepMs = ((typeof performance !== 'undefined' ? performance.now() : Date.now()) - t0) / this.steps;
