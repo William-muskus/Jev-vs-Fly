@@ -25,7 +25,6 @@ export const FlyBrainView = memo(function FlyBrainView({
 }) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const vizRef = useRef<BrainCanvas | null>(null);
-  const sawLive = useRef(false);
   const [liveCaption, setLiveCaption] = useState<string | null>(null);
 
   useEffect(() => {
@@ -46,16 +45,12 @@ export const FlyBrainView = memo(function FlyBrainView({
   useEffect(() => {
     const viz = vizRef.current;
     if (!viz) return;
-    if (thinking) {
-      viz.resetLiveScale();
-      sawLive.current = false;
-    }
+    if (thinking) viz.resetLiveScale();
     viz.setThinking(thinking);
     if (!thinking) setLiveCaption(null);
   }, [thinking]);
 
   const onLive = useCallback((sample: Float32Array | number[], step: number, steps: number): void => {
-    sawLive.current = true;
     if (steps > 1) {
       const label = `step ${step + 1}/${steps}`;
       setLiveCaption(label);
@@ -73,15 +68,6 @@ export const FlyBrainView = memo(function FlyBrainView({
       if (liveBind?.current === onLive) liveBind.current = null;
     };
   }, [liveBind, onLive]);
-
-  useEffect(() => {
-    const viz = vizRef.current;
-    if (!viz || !thought?.activitySample || thinking) return;
-    // Live packets already painted the search. The leftover `thought` is the
-    // first look at the board — snapping to it here would rewind the map.
-    if (sawLive.current) return;
-    viz.setLiveActivity(thought.activitySample);
-  }, [thought, thinking]);
 
   const stateLabel = thinking
     ? liveStep

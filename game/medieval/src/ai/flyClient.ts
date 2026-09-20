@@ -160,7 +160,18 @@ export class FlyClient {
         }
         if (msg.type === "thought") {
           const thought = flyThoughtFromReply(msg);
-          if (thought) this.onThought?.(thought);
+          if (thought) {
+            this.onThought?.(thought);
+            // Same pipe as `live`: paint now, while the worker is still choosing.
+            // Do not wait for thinking=false — that is after the move has been returned.
+            if (thought.activitySample) {
+              this.dispatchLive(
+                thought.activitySample,
+                Math.max(0, thought.traceSteps - 1),
+                Math.max(1, thought.traceSteps),
+              );
+            }
+          }
           return;
         }
         if (msg.type === "ready") {
@@ -240,7 +251,16 @@ export class FlyClient {
       });
       if (!sawThought) {
         const thought = flyThoughtFromReply(msg);
-        if (thought) prevThought?.(thought);
+        if (thought) {
+          prevThought?.(thought);
+          if (thought.activitySample) {
+            this.dispatchLive(
+              thought.activitySample,
+              Math.max(0, thought.traceSteps - 1),
+              Math.max(1, thought.traceSteps),
+            );
+          }
+        }
       }
       if (!msg.move) return null;
       const uci = msg.move;
