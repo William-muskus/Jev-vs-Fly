@@ -63,7 +63,12 @@ export class FlyClient {
     };
   }
 
-  private dispatchLive(sample: Float32Array | number[], step: number, steps: number): void {
+  private dispatchLive(
+    sample: Float32Array | number[],
+    step: number,
+    steps: number,
+    ack = false,
+  ): void {
     if (typeof document !== "undefined") {
       document.documentElement.dataset.flyLive = `${step + 1}/${steps}`;
     }
@@ -79,15 +84,28 @@ export class FlyClient {
         /* ignore */
       }
     }
-    this.ackLive();
+    if (ack) this.ackLive(step);
   }
 
-  /** Release the worker's next timestep only after this sample has been applied. */
-  private ackLive(): void {
-    try {
-      this.worker?.postMessage({ type: "live-ack" });
-    } catch {
-      /* worker gone */
+  /**
+   * Let this step hit the screen before the worker runs the next one.
+   * Acking in the same turn lets the connectome finish before a paint, so the
+   * piece can start moving while the map is still catching up.
+   */
+  private ackLive(step: number): void {
+    const worker = this.worker;
+    if (!worker) return;
+    const send = (): void => {
+      try {
+        worker.postMessage({ type: "live-ack", step });
+      } catch {
+        /* worker gone */
+      }
+    };
+    if (typeof requestAnimationFrame === "function") {
+      requestAnimationFrame(() => requestAnimationFrame(send));
+    } else {
+      send();
     }
   }
 
@@ -150,6 +168,7 @@ export class FlyClient {
               msg.activitySample,
               msg.step ?? 0,
               msg.steps && msg.steps > 0 ? msg.steps : 1,
+              true,
             );
           }
           return;
@@ -169,6 +188,7 @@ export class FlyClient {
                 thought.activitySample,
                 Math.max(0, thought.traceSteps - 1),
                 Math.max(1, thought.traceSteps),
+                false,
               );
             }
           }
@@ -258,6 +278,7 @@ export class FlyClient {
               thought.activitySample,
               Math.max(0, thought.traceSteps - 1),
               Math.max(1, thought.traceSteps),
+              false,
             );
           }
         }

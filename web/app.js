@@ -80,7 +80,7 @@ class Brain {
       p.touch(); this.onThinking(msg); return;
     }
     if (msg.type === 'live') {
-      this.worker.postMessage({ type: 'live-ack' });
+      this.worker.postMessage({ type: 'live-ack', step: msg.step });
       return;
     }
     if (msg.type === 'thought') return;
