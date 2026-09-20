@@ -42,7 +42,7 @@ class Brain {
     if (msg.type === 'ready') { this.info = msg; this._resolveReady?.(msg); return; }
     if (msg.type === 'thinking') return;
     if (msg.type === 'live') {
-      this.worker.postMessage({ type: 'live-ack' });
+      this.worker.postMessage({ type: 'live-ack', step: msg.step });
       return;
     }
     if (msg.type === 'thought') return;

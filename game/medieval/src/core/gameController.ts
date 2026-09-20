@@ -973,9 +973,9 @@ export class GameController extends Emitter<ControllerEvents> {
     }
 
     this.thinking = false;
+    this.publish();
     if (!best) {
       this.checkEnd();
-      this.publish();
       return;
     }
     await this.play(best.from, best.to, best.promotion ?? undefined);

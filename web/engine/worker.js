@@ -109,7 +109,7 @@ self.onmessage = (ev) => {
     return;
   }
   if (msg.type === 'live-ack') {
-    resolveLiveAck();
+    resolveLiveAck(msg.step);
     return;
   }
   queue = queue.then(() => dispatch(msg));
@@ -118,8 +118,10 @@ self.onmessage = (ev) => {
 /** How long a yielded forward waits for the hall to paint one live step. */
 const LIVE_ACK_MS = 1000;
 let liveAck = { resolve: null, promise: Promise.resolve() };
+let liveAckStep = -1;
 
-function beginLiveFrame() {
+function beginLiveFrame(step) {
+  liveAckStep = step;
   let settle;
   const promise = new Promise((r) => { settle = r; });
   const timer = setTimeout(() => settle(), LIVE_ACK_MS);
@@ -129,7 +131,8 @@ function beginLiveFrame() {
   };
 }
 
-function resolveLiveAck() {
+function resolveLiveAck(step) {
+  if (step != null && step !== liveAckStep) return;
   liveAck.resolve?.();
   liveAck.resolve = null;
 }
@@ -336,7 +339,7 @@ function liveForwardOpts(id, extra = {}) {
     wait: waitForLiveAck,
     onStep: (t, row) => {
       // Arm the waiter before postMessage so a fast ack cannot arrive unheard.
-      beginLiveFrame();
+      beginLiveFrame(t);
       self.postMessage({ type: 'live', id, activitySample: row, step: t, steps: brain.steps });
     },
   };
@@ -395,7 +398,7 @@ async function handleMove(msg) {
       else {
         const opp = await settle(net.forward(
           enc.encodeBoard(chess),
-          wantLive && !gpu ? liveForwardOpts(msg.id) : { activity: false },
+          { activity: false },
         ));
         oppValue = opp.value;
       }
