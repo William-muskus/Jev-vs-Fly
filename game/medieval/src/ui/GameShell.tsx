@@ -23,7 +23,7 @@ import { GameOverModal } from "./GameOverModal";
 import { Hud } from "./Hud";
 import { useHasKeyboard } from "./inputMode";
 import { cinemaEnabled, FLY_PLAYER_NAME, JEV_PLAYER_NAME, jevFlySideNames, jevWasPlayer, qualityPresetFromSearch, vsComputerSideNames } from "./jevflyFlags";
-import { MainMenu, type MatchConfig } from "./MainMenu";
+import { MainMenu, type JevVsFlyOptions, type MatchConfig } from "./MainMenu";
 import type { MusterChoice } from "./Muster";
 import { SettingsPanel, type GameSettings } from "./SettingsPanel";
 import { useGameSnapshot } from "./useGameSnapshot";
@@ -556,7 +556,7 @@ export function GameShell() {
   );
 
   const autoStarted = useRef(false);
-  const startJevVsFly = useCallback(async () => {
+  const startJevVsFly = useCallback(async (opts?: JevVsFlyOptions) => {
     const gen = ++matchGen.current;
     lastMatch.current = null;
     startingMatch.current = true;
@@ -566,9 +566,9 @@ export function GameShell() {
     audio.blip("press");
     const params = new URLSearchParams(window.location.search);
     const strategy = params.get("strategy") || "best_this_turn";
-    const flyDiff = (params.get("difficulty") || "fly") as "larva" | "fly" | "superfly";
+    const flyDiff = (opts?.flyDifficulty || params.get("difficulty") || "fly") as "larva" | "fly" | "superfly";
     const jevWhite = (params.get("jevColor") || "white") !== "black";
-    const speed = Number(params.get("speed") || "1") || 1;
+    const speed = Number(opts?.speed ?? params.get("speed") || "1") || 1;
     const maxPliesRaw = Number(params.get("maxPlies") || "80");
     const maxPlies = Number.isFinite(maxPliesRaw) && maxPliesRaw > 0 ? maxPliesRaw : 80;
     const cinematics = params.get("cinematics") !== "0";
@@ -899,7 +899,7 @@ export function GameShell() {
         {phase === "menu" && !introPlaying ? (
           <MainMenu
             onStart={(config) => void startMatch(config)}
-            onJevVsFly={() => void startJevVsFly()}
+            onJevVsFly={(opts) => void startJevVsFly(opts)}
             onOpenSettings={() => setShowSettings(true)}
             muster={{ skins: settings.skins, arena: settings.arena }}
             onMuster={handleMuster}

@@ -25,4 +25,14 @@ describe("MainMenu", () => {
     expect(vsFly.opponent).toBe("fly");
     expect(vsFly.flyDifficulty).toBe("superfly");
   });
+
+  it("does not use MatchConfig for the Jev vs Fly watch duel", () => {
+    const watch: MatchConfig = {
+      mode: "demo",
+      difficulty: "medium",
+      playerColor: "w",
+      clockMinutes: null,
+    };
+    expect(watch.opponent).toBeUndefined();
+  });
 });

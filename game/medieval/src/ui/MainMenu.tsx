@@ -20,9 +20,15 @@ export interface MatchConfig {
   flyDifficulty?: FlyDifficulty;
 }
 
+/** Watch-duel options from the AI vs AI tab (and the gold Jev vs Fly button). */
+export interface JevVsFlyOptions {
+  speed?: number;
+  flyDifficulty?: FlyDifficulty;
+}
+
 interface MainMenuProps {
   onStart: (config: MatchConfig) => void;
-  onJevVsFly?: () => void;
+  onJevVsFly?: (opts?: JevVsFlyOptions) => void;
   onOpenSettings: () => void;
   /** Armies and battleground — settled here, before the first move. */
   muster: MusterChoice;
@@ -30,12 +36,6 @@ interface MainMenuProps {
   attract: boolean;
   onInteract: () => void;
 }
-
-const DIFFICULTY_COPY: Record<Difficulty, string> = {
-  easy: "Squire — plays fast and loose",
-  medium: "Knight — thinks three moves deep",
-  hard: "Warlord — full search, no mercy",
-};
 
 const FLY_COPY: Record<FlyDifficulty, string> = {
   larva: "Larva — the smallest connectome",
@@ -70,24 +70,24 @@ export function MainMenu({ onStart, onJevVsFly, onOpenSettings, muster, onMuster
   const [flyDifficulty, setFlyDifficulty] = useState<FlyDifficulty>("fly");
   const [playerColor, setPlayerColor] = useState<Faction>("w");
   const [clock, setClock] = useState<number | null>(null);
-  const [demoWhite, setDemoWhite] = useState<Difficulty>("medium");
-  const [demoBlack, setDemoBlack] = useState<Difficulty>("hard");
   const [demoSpeed, setDemoSpeed] = useState(1);
-  const [demoLoop, setDemoLoop] = useState(true);
   const opponentRef = useRef(opponent);
   const flyDifficultyRef = useRef(flyDifficulty);
   opponentRef.current = opponent;
   flyDifficultyRef.current = flyDifficulty;
 
   const start = (): void => {
+    if (tab === "demo") {
+      onJevVsFly?.({ speed: demoSpeed, flyDifficulty: flyDifficultyRef.current });
+      return;
+    }
     const chosen = opponentRef.current;
     const flyLevel = flyDifficultyRef.current;
     onStart({
       mode: tab,
       difficulty,
       playerColor,
-      clockMinutes: tab === "demo" ? null : clock,
-      demo: tab === "demo" ? { white: demoWhite, black: demoBlack, speed: demoSpeed, autoRematch: demoLoop } : undefined,
+      clockMinutes: clock,
       opponent: tab === "ai" ? chosen : undefined,
       flyDifficulty: tab === "ai" && chosen === "fly" ? flyLevel : undefined,
     });
@@ -116,7 +116,7 @@ export function MainMenu({ onStart, onJevVsFly, onOpenSettings, muster, onMuster
             <button
               type="button"
               className="mc-menu-cta mt-5 inline-flex items-center gap-2 rounded-sm border border-[#c8ab74] bg-[#c8ab74]/15 px-5 py-2 text-sm tracking-[0.18em] text-[#f4e3bd]"
-              onClick={onJevVsFly}
+              onClick={() => onJevVsFly()}
             >
               <Swords size={16} /> Jev vs Fly
             </button>
@@ -239,49 +239,38 @@ export function MainMenu({ onStart, onJevVsFly, onOpenSettings, muster, onMuster
         ) : (
           <div className="mc-fade space-y-5">
             <p className="text-sm italic leading-relaxed text-[#b7a88a]">
-              Two AI commanders duel on their own while the camera drifts around the hall — made for watching and for
-              capturing footage.{" "}
+              {JEV_PLAYER_NAME} plays White. {FLY_PLAYER_NAME} plays Black. You watch — this is the match the hall is
+              built for, not two copies of the old search engine.{" "}
               {hasKeyboard ? (
                 <>
-                  Press <span className="mc-display text-[#e2c98f]">C</span> in the match to hide the whole interface.
+                  Press <span className="mc-display text-[#e2c98f]">C</span> to hide the interface.
                 </>
               ) : (
-                <>Tap the clean-capture sigil in the match to hide the whole interface.</>
+                <>Tap the clean-capture sigil to hide the interface.</>
               )}
             </p>
 
             <div>
-              <p className="mc-display mb-2 text-[0.62rem] tracking-[0.3em] text-[#a89268]">Ivory engine</p>
+              <p className="mc-display mb-2 text-[0.62rem] tracking-[0.3em] text-[#a89268]">Fly brain</p>
               <div className="grid grid-cols-3 gap-2">
-                {(["easy", "medium", "hard"] as Difficulty[]).map((level) => (
+                {(["larva", "fly", "superfly"] as FlyDifficulty[]).map((level) => (
                   <button
                     key={level}
                     type="button"
                     className="mc-chip py-2.5"
-                    data-active={demoWhite === level}
-                    onClick={() => setDemoWhite(level)}
+                    data-active={flyDifficulty === level}
+                    data-fly-brain={level}
+                    aria-pressed={flyDifficulty === level}
+                    onClick={() => {
+                      flyDifficultyRef.current = level;
+                      setFlyDifficulty(level);
+                    }}
                   >
                     {level}
                   </button>
                 ))}
               </div>
-            </div>
-
-            <div>
-              <p className="mc-display mb-2 text-[0.62rem] tracking-[0.3em] text-[#a89268]">Obsidian engine</p>
-              <div className="grid grid-cols-3 gap-2">
-                {(["easy", "medium", "hard"] as Difficulty[]).map((level) => (
-                  <button
-                    key={level}
-                    type="button"
-                    className="mc-chip py-2.5"
-                    data-active={demoBlack === level}
-                    onClick={() => setDemoBlack(level)}
-                  >
-                    {level}
-                  </button>
-                ))}
-              </div>
+              <p className="mt-2 text-xs italic text-[#9c8b6c]">{FLY_COPY[flyDifficulty]}</p>
             </div>
 
             <div>
@@ -300,17 +289,6 @@ export function MainMenu({ onStart, onJevVsFly, onOpenSettings, muster, onMuster
                 ))}
               </div>
             </div>
-
-            <button
-              type="button"
-              className="mc-chip flex w-full items-center justify-between px-3 py-2.5"
-              data-active={demoLoop}
-              onClick={() => setDemoLoop((loop) => !loop)}
-              aria-pressed={demoLoop}
-            >
-              <span>Loop new duels</span>
-              <span className="mc-display text-[0.62rem] tracking-[0.24em]">{demoLoop ? "ON" : "OFF"}</span>
-            </button>
           </div>
         )}
 
@@ -346,7 +324,7 @@ export function MainMenu({ onStart, onJevVsFly, onOpenSettings, muster, onMuster
         >
           {tab === "demo" ? (
             <>
-              <Clapperboard size={15} /> Start AI vs AI
+              <Clapperboard size={15} /> Watch Jev vs Fly
             </>
           ) : (
             <>
@@ -366,7 +344,7 @@ export function MainMenu({ onStart, onJevVsFly, onOpenSettings, muster, onMuster
           </p>
         ) : (
           <p className="mt-2 text-center text-[0.65rem] italic text-[#8a7a5c]">
-            Two copies of the hall engine. Jev vs Fly is the gold button above.
+            Needs the hall server, a TypeSafe key, and the fly brain.
           </p>
         )}
 
