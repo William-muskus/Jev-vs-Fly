@@ -1,4 +1,5 @@
-These meshes are not shipped in git.
+These meshes are not shipped in git. nbauchat's STLs are Cults private-use,
+not MIT — see ../../../../CREDITS.md.
 
 On the computer that already has the Cults STLs, from the repo root:
 
