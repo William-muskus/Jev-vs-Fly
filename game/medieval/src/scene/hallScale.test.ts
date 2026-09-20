@@ -12,9 +12,9 @@ describe("wizard hall scale", () => {
     expect(PIECE_HEIGHT.k).toBeGreaterThan(PIECE_HEIGHT.p);
   });
 
-  it("grows the board a little so the taller army still has squares", () => {
-    expect(TILE).toBeGreaterThan(1.02);
-    expect(TILE).toBeLessThan(1.02 * 1.5);
+  it("gives the 3× army a square wide enough for a Cults plinth", () => {
+    expect(TILE).toBeGreaterThan(1.8);
+    expect(TILE).toBeLessThan(2.5);
     expect(BOARD_REACH).toBeGreaterThan(TILE * 4);
   });
 });

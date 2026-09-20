@@ -23,8 +23,8 @@ import {
   tileMaskTexture,
 } from "./textures";
 
-/** One file/rank in world units — ~30% larger than the original 1.02 square. */
-export const TILE = 1.32;
+/** One file/rank in world units — wide enough for the 3× Cults plinths. */
+export const TILE = 2.1;
 export const BOARD_TOP = 0;
 
 const FILES = "abcdefgh";
@@ -607,7 +607,7 @@ export class BoardView {
   }
 
   private buildBase(): void {
-    const size = TILE * 8 + 1.95;
+    const size = TILE * 8 + 3.1;
     const geometry = this.track(new RoundedBoxGeometry(size, 0.62, size, 4, 0.09));
     const stone = this.track(
       new THREE.MeshStandardMaterial({ color: 0x3b342b, roughness: 0.72, metalness: 0.25 }),

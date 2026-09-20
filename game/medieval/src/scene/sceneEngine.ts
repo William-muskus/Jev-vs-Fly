@@ -93,10 +93,10 @@ interface CameraShot {
 }
 
 const CAMERA_SHOTS: Record<CameraPreset, CameraShot> = {
-  white: { position: new THREE.Vector3(0, 9.2, 11.0), target: new THREE.Vector3(0, 1.05, 0) },
-  black: { position: new THREE.Vector3(0, 9.2, -11.0), target: new THREE.Vector3(0, 1.05, 0) },
-  top: { position: new THREE.Vector3(0, 16.5, 0.45), target: new THREE.Vector3(0, 0.4, 0) },
-  cinematic: { position: new THREE.Vector3(12.2, 7.8, 8.8), target: new THREE.Vector3(-0.4, 1.15, -0.4) },
+  white: { position: new THREE.Vector3(0, 11.2, 11.0), target: new THREE.Vector3(0, 1.15, 0) },
+  black: { position: new THREE.Vector3(0, 11.2, -11.0), target: new THREE.Vector3(0, 1.15, 0) },
+  top: { position: new THREE.Vector3(0, 20.5, 0.5), target: new THREE.Vector3(0, 0.4, 0) },
+  cinematic: { position: new THREE.Vector3(12.2, 9.4, 8.8), target: new THREE.Vector3(-0.4, 1.25, -0.4) },
 };
 
 /**
@@ -105,8 +105,8 @@ const CAMERA_SHOTS: Record<CameraPreset, CameraShot> = {
  * level. This is the angle a still showcase holds for the entire duel.
  */
 const SHOWCASE_SHOT: CameraShot = {
-  position: new THREE.Vector3(9.2, 9.6, 10.5),
-  target: new THREE.Vector3(0, 1.05, 0),
+  position: new THREE.Vector3(9.4, 11.4, 10.6),
+  target: new THREE.Vector3(0, 1.15, 0),
 };
 
 /** What the follow camera looks at between moves. */
