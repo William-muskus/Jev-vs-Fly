@@ -146,6 +146,24 @@ test('a yielded forward matches the sync result', async () => {
   assert.ok(maxAbsDiff(yielded.trace, sync.trace) < 1e-12);
 });
 
+test('a yielded forward can wait between steps', async () => {
+  const m = model({ nRet: 12, nnzMod: 60, readoutSteps: [1, 3], centralDim: 5, activation: 'satrelu' });
+  const js = new FlyBrain(m);
+  const x = randomInput(11);
+  const idx = Int32Array.from([0, 5, 9, 17, 33, 63, 2]);
+  const seen = [];
+  let waits = 0;
+  const out = await js.forward(x, {
+    trace: idx,
+    yield: true,
+    onStep: (t) => seen.push(t),
+    wait: async () => { waits += 1; },
+  });
+  assert.equal(seen.length, js.steps);
+  assert.equal(waits, js.steps);
+  assert.equal(out.trace.length, js.steps * idx.length);
+});
+
 test('a photoreceptor that is also an output neuron and duplicate-free maps', () => {
   const m = model({ nRet: 12 });
   const overlap = Array.from(m.arrays.retina_idx).filter((i) => Array.from(m.arrays.output_idx).includes(i));

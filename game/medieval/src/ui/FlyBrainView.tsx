@@ -1,4 +1,4 @@
-import { memo, useEffect, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useRef, useState } from "react";
 
 import { BrainCanvas } from "../../../../web/brainviz.js";
 import { flyClient } from "../ai/flyClient";
@@ -15,11 +15,13 @@ export const FlyBrainView = memo(function FlyBrainView({
   thought,
   thinking,
   liveBind,
+  liveStep,
 }: {
   anatomy: FlyAnatomy;
   thought: FlyThought | null;
   thinking: boolean;
   liveBind?: { current: ((sample: Float32Array | number[], step: number, steps: number) => void) | null };
+  liveStep?: string | null;
 }) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const vizRef = useRef<BrainCanvas | null>(null);
@@ -52,19 +54,25 @@ export const FlyBrainView = memo(function FlyBrainView({
     if (!thinking) setLiveCaption(null);
   }, [thinking]);
 
+  const onLive = useCallback((sample: Float32Array | number[], step: number, steps: number): void => {
+    sawLive.current = true;
+    if (steps > 1) {
+      const label = `step ${step + 1}/${steps}`;
+      setLiveCaption(label);
+      const el = document.querySelector(".mc-fly-brain-state");
+      if (el) el.textContent = label;
+    }
+    vizRef.current?.setLiveActivity(sample);
+  }, []);
+  if (liveBind) liveBind.current = onLive;
+
   useEffect(() => {
-    const onLive = (sample: Float32Array | number[], step: number, steps: number): void => {
-      sawLive.current = true;
-      if (steps > 1) setLiveCaption(`step ${step + 1}/${steps}`);
-      vizRef.current?.setLiveActivity(sample);
-    };
-    if (liveBind) liveBind.current = onLive;
     const unsub = flyClient.subscribeLive(onLive);
     return () => {
       unsub();
       if (liveBind?.current === onLive) liveBind.current = null;
     };
-  }, [liveBind]);
+  }, [liveBind, onLive]);
 
   useEffect(() => {
     const viz = vizRef.current;
@@ -75,7 +83,13 @@ export const FlyBrainView = memo(function FlyBrainView({
     viz.setLiveActivity(thought.activitySample);
   }, [thought, thinking]);
 
-  const stateLabel = thinking ? liveCaption ?? "thinking" : thought ? "thought" : "quiet";
+  const stateLabel = thinking
+    ? liveStep
+      ? `step ${liveStep}`
+      : liveCaption ?? "thinking"
+    : thought
+      ? "thought"
+      : "quiet";
 
   return (
     <div className="mc-fly-brain mc-slate pointer-events-none" aria-label={`${FLY_PLAYER_NAME} neural activity`}>

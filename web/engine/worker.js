@@ -8,6 +8,9 @@
 //               {type:'eval', id, fen, moves:[uci...]}
 //               {type:'cancel', id}     abandon the move request `id` (a running superfly search stops
 //                                       within a few simulations; a queued one is skipped)
+//               {type:'live-ack'}       the page has painted the last `live` packet; a yielded JS
+//                                       forward waits for this (or LIVE_ACK_MS) before the next step
+//                                       so the neural map stays in lockstep with the connectome
 //               {type:'debug', id, op:'lose-gpu'}   tests only: destroy the WebGPU device (→ JS fallback)
 // Messages out: {type:'progress', loaded, total, phase, n, nnz, runName}
 //               {type:'ready', header, features, sample:{idx, xy, cls}, silhouette:{xy, cls}, legend, retina, fromCache, bytes, backend, gpu}
@@ -105,8 +108,35 @@ self.onmessage = (ev) => {
     else { cancelledIds.add(msg.id); if (cancelledIds.size > 256) cancelledIds.clear(); }
     return;
   }
+  if (msg.type === 'live-ack') {
+    resolveLiveAck();
+    return;
+  }
   queue = queue.then(() => dispatch(msg));
 };
+
+/** How long a yielded forward waits for the hall to paint one live step. */
+const LIVE_ACK_MS = 1000;
+let liveAck = { resolve: null, promise: Promise.resolve() };
+
+function beginLiveFrame() {
+  let settle;
+  const promise = new Promise((r) => { settle = r; });
+  const timer = setTimeout(() => settle(), LIVE_ACK_MS);
+  liveAck = {
+    resolve: () => { clearTimeout(timer); settle(); },
+    promise,
+  };
+}
+
+function resolveLiveAck() {
+  liveAck.resolve?.();
+  liveAck.resolve = null;
+}
+
+function waitForLiveAck() {
+  return liveAck.promise;
+}
 
 async function dispatch(msg) {
   try {
@@ -303,7 +333,10 @@ function liveForwardOpts(id, extra = {}) {
     trace: sampleIdx,
     ...extra,
     yield: true,
+    wait: waitForLiveAck,
     onStep: (t, row) => {
+      // Arm the waiter before postMessage so a fast ack cannot arrive unheard.
+      beginLiveFrame();
       self.postMessage({ type: 'live', id, activitySample: row, step: t, steps: brain.steps });
     },
   };

@@ -64,6 +64,9 @@ export class FlyClient {
   }
 
   private dispatchLive(sample: Float32Array | number[], step: number, steps: number): void {
+    if (typeof document !== "undefined") {
+      document.documentElement.dataset.flyLive = `${step + 1}/${steps}`;
+    }
     try {
       this.onLive?.(sample, step, steps);
     } catch {
@@ -75,6 +78,16 @@ export class FlyClient {
       } catch {
         /* ignore */
       }
+    }
+    this.ackLive();
+  }
+
+  /** Release the worker's next timestep only after this sample has been applied. */
+  private ackLive(): void {
+    try {
+      this.worker?.postMessage({ type: "live-ack" });
+    } catch {
+      /* worker gone */
     }
   }
 

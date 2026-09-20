@@ -66,6 +66,7 @@ interface HudProps {
   flyAnatomy?: FlyAnatomy | null;
   flyThought?: FlyThought | null;
   flyThinking?: boolean;
+  flyLiveStep?: string | null;
   flyLiveBind?: MutableRefObject<((sample: Float32Array | number[], step: number, steps: number) => void) | null>;
 }
 
@@ -161,6 +162,7 @@ export function Hud({
   flyAnatomy = null,
   flyThought = null,
   flyThinking = false,
+  flyLiveStep = null,
   flyLiveBind,
 }: HudProps) {
   const railRoom = useRoomForRail();
@@ -314,6 +316,7 @@ export function Hud({
               thought={flyThought}
               thinking={flyThinking}
               liveBind={flyLiveBind}
+              liveStep={flyLiveStep}
             />
           ) : null}
         </div>

@@ -130,14 +130,14 @@ export class FlyBrain {
   /**
    * One full forward pass.
    * @param {Float32Array} x  flattened planes, length input_dim (1280)
-   * @param {{trace?: Int32Array|Uint32Array|number[]|null, activity?: boolean, onStep?: function}} [opts]
+   * @param {{trace?: Int32Array|Uint32Array|number[]|null, activity?: boolean, onStep?: function, yield?: boolean, wait?: function}} [opts]
    *   trace: neuron indices to sample after every timestep → result.trace = Float32Array(steps * trace.length),
    *   laid out [t][j] (t = 0 is the state after the first step). `activity` is accepted for API symmetry
    *   with FlyBrainGPU and ignored (the final state costs nothing here).
    *   onStep(t, row): after every timestep, a fresh Float32Array(trace.length) of that step's sample
    *   (same neurons as `trace`). The hall posts these to the page so the map lights as the fly thinks.
-   *   yield: if true, `forward` returns a Promise and waits a macrotask after every step so the
-   *   page can paint live activity. Search / tests keep the sync path.
+   *   yield: if true, `forward` returns a Promise and awaits `wait()` (or a macrotask) after every
+   *   step so the page can paint live activity. Search / tests keep the sync path.
    * @returns {{policy: Float32Array, value: number, activity: Float32Array, retinaDrive: Float32Array|null, trace: Float32Array|null}}
    *   activity is the final hidden state and retinaDrive the per-photoreceptor drive (null without
    *   vision) — both views that are reused on the next call (copy if you keep them); policy and trace are fresh.
@@ -265,8 +265,11 @@ export class FlyBrain {
       for (const _ of eachStep()) { /* drain */ }
       return afterLoop();
     }
+    const waitStep = opts && typeof opts.wait === 'function'
+      ? opts.wait
+      : () => new Promise((r) => setTimeout(r, 0));
     return (async () => {
-      for (const _ of eachStep()) await new Promise((r) => setTimeout(r, 0));
+      for (const _ of eachStep()) await waitStep();
       return afterLoop();
     })();
   }
