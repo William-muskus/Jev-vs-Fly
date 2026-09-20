@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import sys
 import threading
 from collections.abc import Callable, Mapping
@@ -84,6 +85,22 @@ def _ensure_model_file(name: str, model_dir: Path) -> Path:
         return dest
 
 
+_RESULT_TAIL = re.compile(r"(?:\s+(?:1-0|0-1|1/2-1/2|\*))+\s*$")
+
+
+def _movetext_body(pgn: str, result: str | None) -> str:
+    """Drop chess.js placeholder headers and a dangling `*`, then stamp Result."""
+    body: list[str] = []
+    for line in pgn.splitlines():
+        if line.startswith("["):
+            continue
+        body.append(line)
+    movetext = _RESULT_TAIL.sub("", "\n".join(body).strip()).strip()
+    if result:
+        movetext = f"{movetext} {result}".strip()
+    return movetext
+
+
 def _write_pgn(records_dir: Path, req: GameRecord) -> Path:
     records_dir.mkdir(parents=True, exist_ok=True)
     headers = [
@@ -95,13 +112,7 @@ def _write_pgn(records_dir: Path, req: GameRecord) -> Path:
         headers.append(f'[Result "{req.result}"]')
     if req.reason:
         headers.append(f'[Termination "{req.reason}"]')
-    body: list[str] = []
-    for line in req.pgn.splitlines():
-        if line.startswith("["):
-            continue
-        body.append(line)
-    movetext = "\n".join(body).strip()
-    text = "\n".join(headers) + "\n\n" + movetext + "\n"
+    text = "\n".join(headers) + "\n\n" + _movetext_body(req.pgn, req.result) + "\n"
     dest = records_dir / "latest.pgn"
     dest.write_text(text, encoding="utf-8")
     try:
@@ -164,7 +175,8 @@ def create_app(
             raise HTTPException(502, f"Jev request failed: {e}") from e
         print(
             f"Jev played {pick.san} ({pick.uci}) strategy={pick.strategy} "
-            f"latency={pick.latency_s:.2f}s skipped_api={pick.skipped_api}",
+            f"latency={pick.latency_s:.2f}s skipped_api={pick.skipped_api} "
+            f"tokens={int((pick.usage or {}).get('input_tokens') or 0)}",
             flush=True,
         )
         return JSONResponse(pick.to_json())

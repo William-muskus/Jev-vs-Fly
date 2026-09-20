@@ -13,6 +13,7 @@ import {
 } from "../assets/generated";
 import type { Faction, PieceKind } from "../core/types";
 import { loadGltf } from "./gltfQueue";
+import { TILE } from "./board";
 import { BADGE_LIFT, BADGE_SCALE, TOKEN_SCALE, rankBadgeTexture, tacticalTokenTexture } from "./rankBadges";
 import { factionRingTexture, radialTexture } from "./textures";
 import { Ease, type TweenManager } from "./tween";
@@ -21,28 +22,31 @@ import { buildWizardChessPiece } from "./wizardPieces";
 import { wizardGlbKinds, wizardNudge, wizardStandEuler, wizardYawRadians } from "./wizardRoster";
 
 /**
- * Rendered height (world units, 1 unit = 1 board square) per piece kind.
+ * Rendered height (world units, 1 unit ≈ 1 board square) per piece kind.
  *
- * Only two tiers read at camera distance: the men the crown sends out, and the
- * crown itself. The three officer ranks therefore stand in the royal band beside
- * the queen — a knight, a mage and a tower guardian are champions, not
- * footsoldiers, and at their old 0.84-0.88 they sat close enough to the pawn's
- * 0.7 to be mistaken for one. The king alone still stands over everything.
+ * Wizard chess wants the army to tower over the tiles: these are 3× the old
+ * Staunton token heights (pawn 0.78 → 2.34, king 1.12 → 3.36). GLBs and the
+ * gothic fallback are uniformly scaled to this, so they grow in every axis.
+ * The board grew only a little (`TILE`), so a king now stands about three
+ * squares tall — a champion holding the square, not a token sitting on it.
  *
- * The footsoldier sits at 0.78 rather than 0.7: sixteen of the thirty-two figures
- * on the board are pawns, so they are what the hall mostly *is*, and at 0.7 a
- * man stood barely two thirds of the tile he occupied — he read as a token on his
- * square instead of a soldier holding it. 0.78 still leaves a fifth of a square
- * of daylight to the officer band, which is what keeps the two tiers separable.
+ * The two-tier read still holds: sixteen pawns at 2.34, officers with the
+ * queen at ~3.0, the king a head above.
  */
 export const PIECE_HEIGHT: Record<PieceKind, number> = {
-  p: 0.78,
-  n: 0.98,
-  b: 1.0,
-  r: 0.99,
-  q: 1.0,
-  k: 1.12,
+  p: 2.34,
+  n: 2.94,
+  b: 3.0,
+  r: 2.97,
+  q: 3.0,
+  k: 3.36,
 };
+
+/** How much taller the living set is than the original Staunton tokens. */
+export const PIECE_HEIGHT_SCALE = 3;
+
+/** Captured figures on the side tray, shrunk so a 3× army still fits. */
+export const TRAY_FIGURE_SCALE = 0.18;
 
 export const FACTION_ACCENT: Record<Faction, number> = {
   w: 0x6ea8ff,
@@ -1707,7 +1711,7 @@ const colliderGeometries = new Map<PieceKind, THREE.BoxGeometry>();
 function sharedColliderGeometry(kind: PieceKind): THREE.BoxGeometry {
   let geometry = colliderGeometries.get(kind);
   if (!geometry) {
-    geometry = new THREE.BoxGeometry(0.86, PIECE_HEIGHT[kind] * 1.1, 0.86);
+    geometry = new THREE.BoxGeometry(TILE * 0.84, PIECE_HEIGHT[kind] * 1.1, TILE * 0.84);
     colliderGeometries.set(kind, geometry);
   }
   return geometry;
@@ -1723,7 +1727,7 @@ function sharedColliderMaterial(): THREE.MeshBasicMaterial {
 
 let discGeometry: THREE.PlaneGeometry | null = null;
 function sharedDiscGeometry(): THREE.PlaneGeometry {
-  if (!discGeometry) discGeometry = new THREE.PlaneGeometry(0.95, 0.95);
+    if (!discGeometry) discGeometry = new THREE.PlaneGeometry(TILE * 0.93, TILE * 0.93);
   return discGeometry;
 }
 

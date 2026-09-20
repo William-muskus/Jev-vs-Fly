@@ -29,8 +29,9 @@ export const HALL_INNER_RADIUS = 11;
 /**
  * Radius of the sphere a framing has to contain: the eight files plus a margin
  * for the figures standing on the outer ranks and the shields above their heads.
+ * Taller wizard pieces need extra reach so a king on the near rank still fits.
  */
-export const BOARD_REACH = TILE * 4 + 0.45;
+export const BOARD_REACH = TILE * 4 + 1.85;
 
 /** Widest lens the engine will ever open up to, however narrow the screen is. */
 export const MAX_LENS_FOV = 78;
@@ -187,8 +188,8 @@ export function orbitLimits(view: ViewportProfile, fitted: number): OrbitLimits 
   const handheld = view.handheld;
   return {
     // A pinch must not be able to bury the camera inside the front rank.
-    minDistance: handheld ? 5.8 : 4.5,
-    maxDistance: Math.max(handheld ? 19 : 17, fitted * 1.25),
+    minDistance: handheld ? 7.4 : 6.4,
+    maxDistance: Math.max(handheld ? 22 : 20, fitted * 1.25),
     minPolarAngle: 0.12,
     // Phones never get the near-ground angle: at eye level the board is a line
     // and the whole screen is hall.

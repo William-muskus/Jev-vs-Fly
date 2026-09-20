@@ -20,6 +20,7 @@ import {
   FACTION_ACCENT,
   PieceFactory,
   PieceView,
+  TRAY_FIGURE_SCALE,
   type ClipName,
   type MarchClip,
   type TemplateKey,
@@ -92,10 +93,10 @@ interface CameraShot {
 }
 
 const CAMERA_SHOTS: Record<CameraPreset, CameraShot> = {
-  white: { position: new THREE.Vector3(0, 6.4, 8.6), target: new THREE.Vector3(0, 0.35, 0) },
-  black: { position: new THREE.Vector3(0, 6.4, -8.6), target: new THREE.Vector3(0, 0.35, 0) },
-  top: { position: new THREE.Vector3(0, 12.4, 0.35), target: new THREE.Vector3(0, 0.2, 0) },
-  cinematic: { position: new THREE.Vector3(9.6, 3.6, 6.8), target: new THREE.Vector3(-0.4, 0.5, -0.4) },
+  white: { position: new THREE.Vector3(0, 9.2, 11.0), target: new THREE.Vector3(0, 1.05, 0) },
+  black: { position: new THREE.Vector3(0, 9.2, -11.0), target: new THREE.Vector3(0, 1.05, 0) },
+  top: { position: new THREE.Vector3(0, 16.5, 0.45), target: new THREE.Vector3(0, 0.4, 0) },
+  cinematic: { position: new THREE.Vector3(12.2, 7.8, 8.8), target: new THREE.Vector3(-0.4, 1.15, -0.4) },
 };
 
 /**
@@ -104,12 +105,12 @@ const CAMERA_SHOTS: Record<CameraPreset, CameraShot> = {
  * level. This is the angle a still showcase holds for the entire duel.
  */
 const SHOWCASE_SHOT: CameraShot = {
-  position: new THREE.Vector3(7.1, 6.5, 8.2),
-  target: new THREE.Vector3(0, 0.35, 0),
+  position: new THREE.Vector3(9.2, 9.6, 10.5),
+  target: new THREE.Vector3(0, 1.05, 0),
 };
 
 /** What the follow camera looks at between moves. */
-const BOARD_FOCUS = new THREE.Vector3(0, 0.45, 0);
+const BOARD_FOCUS = new THREE.Vector3(0, 1.15, 0);
 
 /**
  * How far the follow rig leans towards the action, as a fraction of the way from
@@ -180,7 +181,7 @@ const PROMOTION_CHOICES: readonly { kind: PieceKind; key: string }[] = [
 ];
 
 /** Candidate figure scale, and the world gaps between plinths. */
-const PROMOTION_SLOT_SCALE = 0.92;
+const PROMOTION_SLOT_SCALE = 0.31;
 const PROMOTION_SPACING = 1.5;
 const PROMOTION_ROW_GAP = 2;
 /** Height of one slot's contents (plinth, figure, name plate) in world units. */
@@ -1544,7 +1545,7 @@ export class SceneEngine {
     // The fallen figure stands back up once it reaches the tray.
     piece.resetPose();
     const destination = this.trayPosition(piece.color, index);
-    piece.container.scale.setScalar(0.55);
+    piece.container.scale.setScalar(TRAY_FIGURE_SCALE);
     piece.container.position.copy(destination);
     piece.setOpacity(0);
     await this.tweens.to({

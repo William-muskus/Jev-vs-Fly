@@ -44,3 +44,8 @@ export function vsComputerSideNames(
     ? { w: HUMAN_PLAYER_NAME, b: ai }
     : { w: ai, b: HUMAN_PLAYER_NAME };
 }
+
+/** True when Jev sat on either banner — the victory parchment then shows spend. */
+export function jevWasPlayer(sideNames?: { w: string; b: string } | null): boolean {
+  return sideNames?.w === JEV_PLAYER_NAME || sideNames?.b === JEV_PLAYER_NAME;
+}

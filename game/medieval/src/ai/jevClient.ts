@@ -1,4 +1,5 @@
 import type { EngineMove } from "./aiClient";
+import { parseJevUsage, type JevUsage } from "./jevSpend";
 import type { PieceKind, SquareId } from "../core/types";
 
 function uciToMove(uci: string): EngineMove {
@@ -8,8 +9,13 @@ function uciToMove(uci: string): EngineMove {
   return { from, to, promotion: promo ?? null, score: 0, depth: 0 };
 }
 
+export interface JevMoveReply {
+  move: EngineMove;
+  usage: JevUsage;
+}
+
 /** Server-side Jev: TypeSafe Choice over the legal list. The API key stays on the server. */
-export async function jevBestMove(fen: string, strategy = "best_this_turn"): Promise<EngineMove | null> {
+export async function jevBestMove(fen: string, strategy = "best_this_turn"): Promise<JevMoveReply | null> {
   let last: Error = new Error("Jev request failed");
   for (let attempt = 0; attempt < 3; attempt += 1) {
     try {
@@ -22,9 +28,9 @@ export async function jevBestMove(fen: string, strategy = "best_this_turn"): Pro
         const body = await res.json().catch(() => ({}));
         throw new Error(body.detail || body.message || `Jev HTTP ${res.status}`);
       }
-      const data = (await res.json()) as { uci?: string };
+      const data = (await res.json()) as { uci?: string; usage?: unknown };
       if (!data.uci) return null;
-      return uciToMove(data.uci);
+      return { move: uciToMove(data.uci), usage: parseJevUsage(data.usage) };
     } catch (err) {
       last = err instanceof Error ? err : new Error(String(err));
       if (attempt === 2) break;
