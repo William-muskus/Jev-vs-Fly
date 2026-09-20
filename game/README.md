@@ -12,9 +12,10 @@ enchanted. A capture always destroys the piece that is taken — there is no
 combat roll — and the hall calls each move in English (*White knight to F3!*).
 
 The 3D hall is vendored from [King's Gambit](https://github.com/alexngdev99/rork-medieval-3d-chess)
-(MIT). The gothic-Staunton army is original. nbauchat's Cults STLs are
-**private-use / no-AI** and are not in this repo — convert them on your machine
-(see **Your Cults STLs** below).
+(MIT — [`medieval/LICENSE`](medieval/LICENSE)). The gothic-Staunton army is original.
+nbauchat's [Harry Potter chess STLs](https://cults3d.com/en/3d-model/art/harry-potter-chess)
+are **Cults private-use / no-AI**, not MIT, and are not in this repo — convert them
+on your machine (see **Your Cults STLs** below). Full list: [`../CREDITS.md`](../CREDITS.md).
 
 ```
   browser                         this server

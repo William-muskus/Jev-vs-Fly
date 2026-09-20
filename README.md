@@ -11,8 +11,11 @@ engine is unchanged. On top of it:
   the fly still runs in the browser from the published FlyWire blob. The 3D hall
   is King's Gambit; the pieces smash whoever they take.
 
+Authors, upstream repos, and licenses: [`CREDITS.md`](CREDITS.md).
+
 If you have nbauchat's Cults `.stl` files on your PC, convert them locally
-(do not commit them): see **Your Cults STLs** in [`game/README.md`](game/README.md).
+(do not commit them — they are Cults private-use, not MIT): see **Your Cults STLs**
+in [`game/README.md`](game/README.md).
 
 ```bash
 export TYPESAFE_API_KEY=…          # never commit this
@@ -393,5 +396,8 @@ model download there are no requests.
 ## License
 
 The code in this repository is released under the **MIT License** (see [`LICENSE`](LICENSE)),
-© 2026 Carlo Esposito. The FlyWire data and the exported brain models derived from it are subject to
+© 2026 Carlo Esposito, plus the King's Gambit hall (MIT, [`game/medieval/LICENSE`](game/medieval/LICENSE)).
+The FlyWire data and the exported brain models derived from it are subject to
 the FlyWire terms (CC BY-NC 4.0); the Lichess games are CC0; `web/vendor/chess.js` is BSD-2-Clause.
+Full attribution: [`CREDITS.md`](CREDITS.md). nbauchat's Cults chess STLs are **not**
+MIT and are **not** shipped.
