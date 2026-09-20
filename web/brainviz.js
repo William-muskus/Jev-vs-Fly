@@ -150,7 +150,8 @@ export class BrainCanvas {
     this.playing = false;
     this.from = null;
     this.target = null;
-    const n = Math.min(this.values.length, values.length);
+    const n = Math.min(this.values.length, values.length || 0);
+    if (!Number.isFinite(n) || n <= 0) return;
     let peak = this.liveScale;
     for (let i = 0; i < n; i++) {
       const v = Math.log1p(Math.abs(values[i]));

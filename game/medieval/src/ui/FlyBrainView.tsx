@@ -14,10 +14,12 @@ export const FlyBrainView = memo(function FlyBrainView({
   anatomy,
   thought,
   thinking,
+  liveBind,
 }: {
   anatomy: FlyAnatomy;
   thought: FlyThought | null;
   thinking: boolean;
+  liveBind?: { current: ((sample: Float32Array | number[], step: number, steps: number) => void) | null };
 }) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const vizRef = useRef<BrainCanvas | null>(null);
@@ -53,11 +55,16 @@ export const FlyBrainView = memo(function FlyBrainView({
   useEffect(() => {
     const onLive = (sample: Float32Array | number[], step: number, steps: number): void => {
       sawLive.current = true;
-      vizRef.current?.setLiveActivity(sample);
       if (steps > 1) setLiveCaption(`step ${step + 1}/${steps}`);
+      vizRef.current?.setLiveActivity(sample);
     };
-    return flyClient.subscribeLive(onLive);
-  }, []);
+    if (liveBind) liveBind.current = onLive;
+    const unsub = flyClient.subscribeLive(onLive);
+    return () => {
+      unsub();
+      if (liveBind?.current === onLive) liveBind.current = null;
+    };
+  }, [liveBind]);
 
   useEffect(() => {
     const viz = vizRef.current;

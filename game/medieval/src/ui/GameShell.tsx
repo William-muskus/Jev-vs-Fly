@@ -308,6 +308,7 @@ export function GameShell() {
   const [flyAnatomy, setFlyAnatomy] = useState<FlyAnatomy | null>(null);
   const [flyThought, setFlyThought] = useState<FlyThought | null>(null);
   const [flyThinking, setFlyThinking] = useState(false);
+  const flyLiveBind = useRef<((sample: Float32Array | number[], step: number, steps: number) => void) | null>(null);
   const jevSpendRef = useRef(emptyJevUsage());
   const [jevSpend, setJevSpend] = useState(emptyJevUsage());
 
@@ -497,6 +498,7 @@ export function GameShell() {
       flyClient.onAnatomy = null;
       flyClient.onThought = null;
       flyClient.onThinking = null;
+      flyClient.onLive = null;
 
       const engine = engineRef.current;
       const showcase = config.mode === "demo";
@@ -516,6 +518,7 @@ export function GameShell() {
           flyClient.onAnatomy = setFlyAnatomy;
           flyClient.onThought = setFlyThought;
           flyClient.onThinking = setFlyThinking;
+          flyClient.onLive = (sample, step, steps) => flyLiveBind.current?.(sample, step, steps);
           if (flyClient.anatomy) setFlyAnatomy(flyClient.anatomy);
           try {
             setNotice("Loading the fly brain…");
@@ -576,6 +579,7 @@ export function GameShell() {
     flyClient.onAnatomy = setFlyAnatomy;
     flyClient.onThought = setFlyThought;
     flyClient.onThinking = setFlyThinking;
+    flyClient.onLive = (sample, step, steps) => flyLiveBind.current?.(sample, step, steps);
     if (flyClient.anatomy) setFlyAnatomy(flyClient.anatomy);
     try {
       await flyClient.load("/model/");
@@ -685,6 +689,7 @@ export function GameShell() {
     flyClient.onAnatomy = null;
     flyClient.onThought = null;
     flyClient.onThinking = null;
+    flyClient.onLive = null;
     resetJevSpend();
     setPhase("menu");
   }, [controller, resetJevSpend]);
@@ -936,6 +941,7 @@ export function GameShell() {
             flyAnatomy={flyAnatomy}
             flyThought={flyThought}
             flyThinking={flyThinking}
+            flyLiveBind={flyLiveBind}
           />
         ) : null}
 
