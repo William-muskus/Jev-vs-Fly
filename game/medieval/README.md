@@ -825,27 +825,9 @@ swing / slam / bell voices are synthesised in the mixer.
 ### Taking the square
 
 All three battle beats end the same way: the body is cleared and the victor marches onto the
-square. That arrival used to get the same generic set-down clack as a quiet move, over a
-*softer* landing than usual — so the moment that actually wins a game of chess was the quietest
-thing in the fight. `claimSquare()` fires once from `runMove()` after `landOn()`, which covers
-every path including captures made with the cinematics off or on the flat tactical map:
-
-- **`audio.conquest()`** — a boot on the stone, then a brass motif rising a perfect fifth, then
-  high inharmonic partials left ringing. Notes are scooped into from under pitch through a
-  filter that opens on the attack (that is what makes it brass, not a sawtooth), rooted on G3 —
-  the same fundamental as the judgement bell. Synthesised, so it lands on the frame regardless
-  of the network.
-- **`spawnConquestClaim()`** — the victor's colour drawn **inward**: a wide loop closing tight
-  around the tile, brightening as it converges, sealing into the army's sunburst mark. Every
-  other ring in the game travels outward, so the reversed motion is the signature.
-- **`drawUp()`** — the shoulders come back off the blow and spring level on `outElastic`, driven
-  off the runtime node so unrigged sculpts get it too. A lean, not a victory pose: it has to
-  finish inside the pause before the reply.
-
-All of it scales off `CONQUEST_WEIGHT[victim.kind]` — the only weight on the board that belongs
-to the victim. Heavier captures drop the root by up to half an octave, add an octave as a third
-note, hold the ring closed longer and throw more chips, so a queen falling is audibly not a pawn
-trade.
+square. That arrival is the same `landOn()` dust ring a quiet move gets — slightly softer after a
+kill, because the strike already shook the stone. There is no second inward claim loop, brass
+motif, or draw-up pose after the capture.
 
 ### Ranged captures
 
@@ -1287,9 +1269,9 @@ a painting, and the bottom scrim (`::after`) keeps a bright sky off the name und
 
 Generated MP3s are streamed once and decoded into Web Audio buffers: a hall ambience bed, **one
 score per battleground**, and a tension stem that crossfades in during check and the endgame, plus
-piece, clash, horn and fanfare one-shots. UI blips, footsteps, the wooden set-down knock and the
-claim motif played when a square changes hands (`conquest()`) are synthesised with oscillators and
-noise buffers. Everything routes through one master gain for the mute toggle, and playback only
+piece, clash, horn and fanfare one-shots. UI blips, footsteps and the wooden set-down knock
+are synthesised with oscillators and noise buffers. Everything routes through one master gain
+for the mute toggle, and playback only
 starts after the first user gesture (browser autoplay policy).
 
 ### One score per map

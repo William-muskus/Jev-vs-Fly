@@ -82,23 +82,6 @@ export interface StrikeSoundOptions {
   weight?: number;
 }
 
-/** How the square-taken signature is placed in the mix. */
-export interface ConquestOptions {
-  /** -1 hard left … 1 hard right — where the taken square is on screen. */
-  pan?: number;
-  /** Relative loudness. */
-  volume?: number;
-  /** Seconds to wait before it sounds. */
-  delay?: number;
-  /**
-   * What was taken: 0 a footsoldier, 1 the crown. Drops the motif's root,
-   * lengthens its tail and adds a third note, so the ear knows how big the
-   * capture was without looking at the tray.
-   */
-  weight?: number;
-}
-
-/** The soft confirmation note of a move joining the premove chain. */
 export interface PremoveChimeOptions {
   /** -1 hard left … 1 hard right — where the square the plan lands on sits. */
   pan?: number;
@@ -168,13 +151,6 @@ const SHOT_VOICES: Record<GunVoice, { take: number; synth: number }> = {
   /** Carries its own hall, but none of the sub-bass a field gun owes the room. */
   cannon: { take: 0.96, synth: 0.52 },
 };
-
-/**
- * Root of the claim motif, in Hz — G3, the same fundamental the judgement bell
- * is struck on. Sharing one root is what makes the two read as the same hall
- * speaking rather than as two unrelated sound effects.
- */
-const CLAIM_ROOT = 196;
 
 /** Head-room for the voices so a scream never clips over the score. */
 const CRY_VOLUME = 0.85;
@@ -1698,122 +1674,6 @@ export class AudioManager {
       delay: options.delay,
       rate: 0.95 + Math.random() * 0.1,
     });
-  }
-
-  /**
-   * The square being taken off the enemy — the one sound in the game that means
-   * *conquest* rather than violence, played on the frame the victor's boot comes
-   * down on the tile it has just cleared.
-   *
-   * Three layers, in the order the ear should receive them:
-   *
-   * 1. **The boot claiming the stone.** A dry grit transient over a low stamp —
-   *    weight being put down deliberately, not a body falling.
-   * 2. **The claim itself.** A short brass motif rising a perfect fifth (with an
-   *    octave on top when something big has gone down), each note scooped into
-   *    from slightly under pitch through a filter that opens on the attack. This
-   *    is the signature: two notes, up, and it can only ever mean one thing.
-   * 3. **The standard planted.** Two high inharmonic partials ringing over the
-   *    top for a beat, so the whole thing decays into metal rather than stopping.
-   *
-   * Nothing here is downloaded, so a capture is punctuated on the exact frame it
-   * completes even on a cold cache.
-   */
-  conquest(options: ConquestOptions = {}): void {
-    if (!this.ctx || !this.master || this.muted) return;
-    const ctx = this.ctx;
-    const when = ctx.currentTime + Math.max(0, options.delay ?? 0);
-    const weight = Math.max(0, Math.min(1, options.weight ?? 0.4));
-    const level = 0.28 * (options.volume ?? 1);
-    const bus = this.spellBus(options.pan ?? 0, 0.5);
-
-    // ---- the boot coming down on the taken tile --------------------------
-    const heel = ctx.createBufferSource();
-    heel.buffer = this.noiseBuffer(0.05, 6);
-    const grit = ctx.createBiquadFilter();
-    grit.type = "bandpass";
-    grit.Q.value = 0.85;
-    grit.frequency.value = 1550 - weight * 420;
-    const heelGain = ctx.createGain();
-    heelGain.gain.value = level * 0.55;
-    heel.connect(grit);
-    grit.connect(heelGain);
-    heelGain.connect(bus);
-    heel.start(when);
-
-    const stamp = ctx.createOscillator();
-    const stampGain = ctx.createGain();
-    stamp.type = "sine";
-    stamp.frequency.setValueAtTime(134 - weight * 42, when);
-    stamp.frequency.exponentialRampToValueAtTime(48 - weight * 13, when + 0.2);
-    stampGain.gain.setValueAtTime(0.0001, when);
-    stampGain.gain.exponentialRampToValueAtTime(level * (0.68 + weight * 0.5), when + 0.008);
-    stampGain.gain.exponentialRampToValueAtTime(0.0001, when + 0.26 + weight * 0.12);
-    stamp.connect(stampGain);
-    stampGain.connect(bus);
-    stamp.start(when);
-    stamp.stop(when + 0.42);
-
-    // ---- the claim: root, fifth, and an octave for a heavy kill -----------
-    // A bigger capture speaks lower and slower. Half an octave of drop across
-    // the whole range keeps every rank inside the same motif rather than giving
-    // the queen a different tune.
-    const root = CLAIM_ROOT * Math.pow(2, -weight * 0.5);
-    const gap = 0.08 + weight * 0.042;
-    const notes: number[] = weight > 0.62 ? [1, 1.5, 2] : [1, 1.5];
-    notes.forEach((ratio, index) => {
-      const last = index === notes.length - 1;
-      const at = when + index * gap;
-      const span = last ? 0.42 + weight * 0.36 : gap * 1.6;
-      const peak = level * (last ? 0.6 : 0.4);
-
-      // Brass is a filter opening, not a waveform: the bite arrives a moment
-      // after the note does.
-      const bell = ctx.createBiquadFilter();
-      bell.type = "lowpass";
-      bell.Q.value = 0.9;
-      bell.frequency.setValueAtTime(760, at);
-      bell.frequency.exponentialRampToValueAtTime(2900, at + 0.05);
-      bell.frequency.exponentialRampToValueAtTime(880, at + span);
-      const voice = ctx.createGain();
-      voice.gain.setValueAtTime(0.0001, at);
-      voice.gain.exponentialRampToValueAtTime(peak, at + 0.022);
-      voice.gain.exponentialRampToValueAtTime(0.0001, at + span);
-      bell.connect(voice);
-      voice.connect(bus);
-
-      for (const detune of [0.996, 1.004]) {
-        const brass = ctx.createOscillator();
-        brass.type = "sawtooth";
-        const pitch = root * ratio * detune;
-        // Scooped into from under: what a horn does when it is blown hard.
-        brass.frequency.setValueAtTime(pitch * 0.985, at);
-        brass.frequency.exponentialRampToValueAtTime(pitch, at + 0.03);
-        brass.connect(bell);
-        brass.start(at);
-        brass.stop(at + span + 0.06);
-      }
-    });
-
-    // ---- the standard planted: metal left ringing over the square ---------
-    for (const partial of [
-      { ratio: 4.03, gain: 0.14, decay: 0.85 },
-      { ratio: 6.11, gain: 0.07, decay: 0.6 },
-    ]) {
-      const ring = ctx.createOscillator();
-      const ringGain = ctx.createGain();
-      ring.type = "sine";
-      ring.frequency.value = root * partial.ratio;
-      ringGain.gain.setValueAtTime(0.0001, when + 0.012);
-      ringGain.gain.exponentialRampToValueAtTime(level * partial.gain, when + 0.03);
-      ringGain.gain.exponentialRampToValueAtTime(0.0001, when + partial.decay);
-      ring.connect(ringGain);
-      ringGain.connect(bus);
-      ring.start(when + 0.012);
-      ring.stop(when + partial.decay + 0.08);
-    }
-
-    this.duckBeds(0.76, 0.5 + weight * 0.45);
   }
 
   /** Panned input bus shared by the spell voices. */

@@ -12,13 +12,12 @@
 import * as THREE from "three";
 
 import type { SpellLight } from "./spells";
-import { crescentTexture, factionRingTexture, pillarTexture, shockwaveTexture } from "./textures";
+import { crescentTexture, pillarTexture, shockwaveTexture } from "./textures";
 import { Ease, type TweenManager } from "./tween";
 
 let crescentMap: THREE.CanvasTexture | null = null;
 let waveMap: THREE.CanvasTexture | null = null;
 let pillarMap: THREE.CanvasTexture | null = null;
-let sealMap: THREE.CanvasTexture | null = null;
 let waveGeometry: THREE.PlaneGeometry | null = null;
 let pillarGeometry: THREE.CylinderGeometry | null = null;
 
@@ -37,11 +36,6 @@ function sharedPillarMap(): THREE.CanvasTexture {
   return pillarMap;
 }
 
-function sharedSealMap(): THREE.CanvasTexture {
-  if (!sealMap) sealMap = factionRingTexture("sunburst");
-  return sealMap;
-}
-
 function sharedWaveGeometry(): THREE.PlaneGeometry {
   if (!waveGeometry) waveGeometry = new THREE.PlaneGeometry(2, 2);
   return waveGeometry;
@@ -57,13 +51,11 @@ export function disposeStrikeAssets(): void {
   crescentMap?.dispose();
   waveMap?.dispose();
   pillarMap?.dispose();
-  sealMap?.dispose();
   waveGeometry?.dispose();
   pillarGeometry?.dispose();
   crescentMap = null;
   waveMap = null;
   pillarMap = null;
-  sealMap = null;
   waveGeometry = null;
   pillarGeometry = null;
 }
@@ -203,108 +195,6 @@ export async function spawnGroundWave(
       echo.removeFromParent();
       echoMaterial?.dispose();
     }
-  }
-}
-
-export interface ConquestClaimOptions {
-  /** The victor's colours — the whole point is *whose* square this now is. */
-  color: number;
-  /** How wide the ring starts, in world units, before it closes. */
-  radius: number;
-  /** Height of the discs above the floor. */
-  height: number;
-  /** 0 a footsoldier was taken, 1 the crown: scales the hold and the size. */
-  weight?: number;
-}
-
-/**
- * A square taken off the enemy.
- *
- * Every other ring on this board travels *outward* — blows, landings, waves.
- * This one closes **inward**: a wide loop of the victor's colour drawn tight
- * around the tile, brightening as it converges, snapping shut into the army's
- * own mark and letting go. The reversed motion is the signature. Nothing else
- * in the game moves that way, so a claimed square cannot be mistaken for an
- * impact even at the edge of vision.
- *
- * Two throwaway discs on the caller's tween clock, disposed on the way out —
- * cheap enough to run on every graphics preset.
- */
-export async function spawnConquestClaim(
-  scene: THREE.Object3D,
-  tweens: TweenManager,
-  at: THREE.Vector3,
-  options: ConquestClaimOptions,
-): Promise<void> {
-  const weight = Math.max(0, Math.min(1, options.weight ?? 0.4));
-  const spin = Math.random() * Math.PI;
-
-  const loopMaterial = new THREE.MeshBasicMaterial({
-    map: sharedWaveMap(),
-    color: options.color,
-    transparent: true,
-    depthWrite: false,
-    blending: THREE.AdditiveBlending,
-    opacity: 0,
-    side: THREE.DoubleSide,
-  });
-  const loop = new THREE.Mesh(sharedWaveGeometry(), loopMaterial);
-  loop.rotation.x = -Math.PI / 2;
-  loop.rotation.z = spin;
-  loop.position.set(at.x, options.height, at.z);
-  loop.renderOrder = 7;
-  scene.add(loop);
-
-  // The army's own mark, waiting under the loop for it to arrive.
-  const sealMaterial = new THREE.MeshBasicMaterial({
-    map: sharedSealMap(),
-    color: options.color,
-    transparent: true,
-    depthWrite: false,
-    blending: THREE.AdditiveBlending,
-    opacity: 0,
-    side: THREE.DoubleSide,
-  });
-  const seal = new THREE.Mesh(sharedWaveGeometry(), sealMaterial);
-  seal.rotation.x = -Math.PI / 2;
-  seal.rotation.z = -spin;
-  seal.position.set(at.x, options.height + 0.004, at.z);
-  seal.renderOrder = 8;
-  seal.scale.setScalar(0.9 + weight * 0.2);
-  scene.add(seal);
-
-  const wide = Math.max(0.4, options.radius * 0.5);
-  const tight = 0.42 + weight * 0.12;
-
-  try {
-    // Drawn in: fast at first, arriving softly, so the eye follows it home.
-    await tweens.to({
-      duration: 0.3 + weight * 0.1,
-      easing: Ease.outCubic,
-      onUpdate: (t) => {
-        loop.scale.setScalar(wide + (tight - wide) * t);
-        loopMaterial.opacity = 0.2 + t * 0.75;
-        loop.rotation.z = spin + t * 0.5;
-        // The mark comes up to meet it over the second half of the closing.
-        sealMaterial.opacity = Math.max(0, (t - 0.45) / 0.55) * 0.7;
-      },
-    });
-    // Shut: a single bright beat on the tile, then gone.
-    await tweens.to({
-      duration: 0.34 + weight * 0.16,
-      easing: Ease.outQuint,
-      onUpdate: (t) => {
-        loop.scale.setScalar(tight * (1 + t * 0.7));
-        loopMaterial.opacity = Math.pow(1 - t, 1.7) * 0.95;
-        seal.scale.setScalar((0.9 + weight * 0.2) * (1 + t * 0.35));
-        sealMaterial.opacity = Math.pow(1 - t, 1.4) * 0.7;
-      },
-    });
-  } finally {
-    loop.removeFromParent();
-    seal.removeFromParent();
-    loopMaterial.dispose();
-    sealMaterial.dispose();
   }
 }
 
