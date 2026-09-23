@@ -41,7 +41,6 @@ import {
 import { SPELL_LOOK, SpellLightPool, SpellOrb } from "./spells";
 import {
   disposeStrikeAssets,
-  spawnConquestClaim,
   spawnGroundWave,
   spawnPillar,
   spawnSlash,
@@ -436,24 +435,6 @@ const STRIKES: Record<PieceKind, StrikeProfile> = {
     aftershock: 0.34,
     hold: 0.13,
   },
-};
-
-/**
- * How big a capture reads, by what was taken — not by who took it.
- *
- * This is the one weight on the board that belongs to the *victim*: a pawn
- * trading itself off and a queen going down are the same choreography, and the
- * only thing that can tell them apart at the moment the square changes hands is
- * how much noise and light the claim is allowed to make. Ordered as the ranks
- * are actually valued, so the ear reads the exchange without checking the tray.
- */
-const CONQUEST_WEIGHT: Record<PieceKind, number> = {
-  p: 0.16,
-  n: 0.42,
-  b: 0.46,
-  r: 0.64,
-  q: 0.88,
-  k: 1,
 };
 
 /** How much fire a caster throws, and what it does when it lands. */
@@ -1644,8 +1625,6 @@ export class SceneEngine {
     // Taking the square: dust ring, tile dip and the figure settling its weight.
     // Softer after a kill — the strike already shook the stone.
     this.landOn(piece, event.to, victim ? 0.7 : event.kind === "n" ? 1.25 : 1);
-    // ...and if that square was somebody else's, it is now claimed.
-    if (victim) this.claimSquare(piece, event.to, victim.kind);
     // Arrived: face the enemy side again rather than holding the march heading.
     // A promoting figure is about to be replaced, so it is left alone.
     if (!event.promotion) void piece.turnHome(this.tweens, 0.3);
@@ -1951,90 +1930,6 @@ export class SceneEngine {
     audio.footstep({ pan, timbre: gait.timbre, volume: volume * 1.15, delay: 0.07, jitter: -0.09 });
   }
 
-  /**
-   * The square changing hands.
-   *
-   * Every kill on this board already had a *violent* punctuation — the blow, the
-   * cry, the body thrown clear — but the thing that actually wins a game of
-   * chess happened silently: a figure stepped onto a square that belonged to
-   * somebody else and the board sounded exactly as it does on a quiet move.
-   * This is that moment given its own beat, and it is deliberately small: the
-   * fight was the spectacle, this is the full stop after it.
-   *
-   * Three things, all keyed to what was taken rather than to who took it (see
-   * {@link CONQUEST_WEIGHT}), so trading a pawn never sounds like felling a queen:
-   *
-   * - the claim signature — a boot on the stone under a rising brass motif;
-   * - the victor's colours closing inward over the tile it has just cleared;
-   * - the figure itself drawing up to its full height on the new square.
-   */
-  private claimSquare(victor: PieceView, square: SquareId, taken: PieceKind): void {
-    const settings = QUALITY_SETTINGS[this.preset];
-    const weight = CONQUEST_WEIGHT[taken];
-    const accent = FACTION_ACCENT[victor.color];
-    const centre = squareToWorld(square, BOARD_TOP + 0.032);
-
-    audio.conquest({
-      pan: this.stereoPan(centre),
-      weight,
-      volume: 0.78 + weight * 0.3,
-    });
-
-    void spawnConquestClaim(this.scene, this.tweens, centre, {
-      color: accent,
-      radius: TILE * (2.1 + weight * 0.7),
-      height: BOARD_TOP + 0.028,
-      weight,
-    });
-
-    // Chips of the old occupant's tile thrown up as the mark seals — fired on a
-    // short delay so they land with the ring closing, not with the footfall.
-    const chips = Math.max(4, Math.round(settings.captureParticles * (0.16 + weight * 0.16)));
-    void (async () => {
-      await this.beat(0.26);
-      if (this.disposed) return;
-      this.effects.spawnBurst(centre.clone().setY(BOARD_TOP + 0.1), accent, chips, {
-        speed: 0.9 + weight * 0.7,
-        life: 0.6,
-        gravity: 2.6,
-        radius: 0.34,
-        size: 0.1,
-        growth: 0.6,
-        rise: 0.5,
-        drag: 1.2,
-      });
-      this.effects.spawnFlash(centre.clone().setY(BOARD_TOP + 0.18), 1.1 + weight * 0.9, 0.26);
-    })();
-
-    // The team ring under the figure answers its own colour arriving.
-    victor.flareAura(Math.min(1.5, 1 + weight * 0.5));
-    void this.drawUp(victor, weight);
-  }
-
-  /**
-   * The victor drawing itself up on the square it has taken: the shoulders come
-   * back off the blow for a beat and spring level again. Driven off the runtime
-   * node rather than a clip, so every figure gets it — rigged or not, and
-   * whichever of the three battle beats it just finished.
-   *
-   * Deliberately a *lean*, not a pose: it has to finish inside the pause before
-   * the opponent replies, or the board reads as waiting for a victory dance.
-   */
-  private async drawUp(piece: PieceView, weight: number): Promise<void> {
-    const lean = 0.045 + weight * 0.055;
-    await this.tweens.to({
-      duration: 0.13,
-      easing: Ease.outCubic,
-      onUpdate: (t) => piece.setStrikeTilt(-lean * t),
-    });
-    await this.tweens.to({
-      duration: 0.5,
-      easing: Ease.outElastic,
-      onUpdate: (t) => piece.setStrikeTilt(-lean * (1 - t)),
-    });
-    piece.setStrikeTilt(0);
-  }
-
   /** Knees taking the load: a fast compression that springs back out. */
   private async settle(piece: PieceView, strength: number): Promise<void> {
     const depth = Math.min(1, 0.5 + strength * 0.45);
@@ -2204,8 +2099,8 @@ export class SceneEngine {
     });
 
     // The corpse is thrown clear in smoke as the victor takes the square. The
-    // arrival itself is punctuated by the claim beat (see `claimSquare`), not by
-    // the generic set-down clack a quiet move gets.
+    // arrival is the same `landOn()` dust ring a quiet move gets — a capture
+    // does not grow a second inward claim loop after the strike.
     await Promise.all([
       this.banish(victim, blow),
       // The last stride onto the square it has just cleared.
